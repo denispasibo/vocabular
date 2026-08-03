@@ -247,6 +247,25 @@ main { max-width: 640px; margin: 0 auto; padding: 8px 16px 24px; }
 
 /* --- Review --- */
 .review-progress { text-align: center; font-size: 13.5px; margin-bottom: 10px; }
+.review-cue { font-size: 20px; font-weight: 650; margin: 8px 0 4px; line-height: 1.4; }
+.typing-row { display: flex; gap: 8px; margin-top: 12px; }
+.typing-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  font-size: 17px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+}
+.typing-row input:focus { border-color: var(--accent); }
+.result-ok { color: #1e9e5a; }
+.result-bad { color: var(--danger); }
+@media (prefers-color-scheme: dark) {
+  .result-ok { color: #4ecb7d; }
+}
 .review-verdict { display: flex; gap: 10px; margin-top: 12px; }
 .review-verdict .btn { flex: 1; }
 .btn-forgot { color: var(--danger); }

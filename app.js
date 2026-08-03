@@ -613,6 +613,49 @@ function startReview() {
   renderReviewCard();
 }
 
+// Edit distance for typo tolerance in typing cards (bounded to 0/1/many)
+function levenshtein(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return 99;
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => {
+    const row = new Array(b.length + 1).fill(0);
+    row[0] = i;
+    return row;
+  });
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function normalizeAnswer(s) {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// The prompt shown instead of the word on reverse cards
+function reviewCue(entry) {
+  if (entry.translation) return `🇷🇺 ${esc(entry.translation)}`;
+  const d = entry.meanings[0]?.definitions[0];
+  if (d?.definitionRu) return `🇷🇺 ${esc(d.definitionRu)}`;
+  if (d?.definition) return esc(d.definition);
+  return null;
+}
+
+// Recognition first; later stages mix in reverse and typing cards
+function pickCardType(entry) {
+  if (!reviewCue(entry) || (entry.srs?.stage ?? 0) === 0) return 'recognition';
+  const r = Math.random();
+  if (r < 0.25) return 'recognition';
+  if (r < 0.65) return 'production';
+  return 'typing';
+}
+
 function renderReviewCard() {
   if (!reviewQueue.length) {
     const withSrs = loadWords().filter((x) => x.srs);
@@ -630,43 +673,118 @@ function renderReviewCard() {
   }
 
   const entry = reviewQueue[0];
-  const def = entry.meanings[0]?.definitions[0];
-  reviewArea.innerHTML = `
-    <p class="review-progress muted">${reviewDone + 1} / ${reviewDone + reviewQueue.length}</p>
-    <div class="word-head">
-      <div>
-        <div class="word-title">${esc(entry.word)}</div>
-        ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
-      </div>
-      <button class="audio-btn" type="button" id="review-audio" aria-label="Pronunciation">🔊</button>
-    </div>
-    <div class="step open" style="padding:16px">
-      <p class="muted" style="margin-bottom:12px">Can you recall what it means?</p>
-      <div id="review-answer" hidden>
-        ${def ? `<div class="def-item">${esc(def.definition)}
-          ${def.definitionRu ? `<div class="def-ru">🇷🇺 ${esc(def.definitionRu)}</div>` : ''}
-          ${def.example ? `<div class="def-example">“${esc(def.example)}”</div>` : ''}</div>` : ''}
-        ${!def && entry.translation ? `<p>🇷🇺 ${esc(entry.translation)}</p>` : ''}
-        ${entry.note ? `<p style="margin-top:8px">📝 <span class="muted">${esc(entry.note)}</span></p>` : ''}
-      </div>
-      <button class="btn btn-ghost btn-block" id="review-show" style="margin-top:4px">👁 Show meaning</button>
-      <div id="review-verdict" class="review-verdict" hidden>
-        <button class="btn btn-ghost btn-forgot" id="review-forgot">❌ Forgot</button>
-        <button class="btn btn-primary" id="review-knew">✅ Got it</button>
-      </div>
-    </div>`;
-
-  $('#review-audio').addEventListener('click', () => {
+  const type = pickCardType(entry);
+  const progress = `<p class="review-progress muted">${reviewDone + 1} / ${reviewDone + reviewQueue.length}</p>`;
+  const playWord = () => {
     if (entry.audio) new Audio(entry.audio).play().catch(() => speak(entry.word));
     else speak(entry.word);
+  };
+  const verdictButtons = `
+    <div id="review-verdict" class="review-verdict" hidden>
+      <button class="btn btn-ghost btn-forgot" id="review-forgot">❌ Forgot</button>
+      <button class="btn btn-primary" id="review-knew">✅ Got it</button>
+    </div>`;
+  const bindVerdict = () => {
+    $('#review-forgot').addEventListener('click', () => answerReview(entry, false));
+    $('#review-knew').addEventListener('click', () => answerReview(entry, true));
+  };
+
+  if (type === 'recognition') {
+    // EN word shown → recall the meaning
+    const def = entry.meanings[0]?.definitions[0];
+    reviewArea.innerHTML = `${progress}
+      <div class="word-head">
+        <div>
+          <div class="word-title">${esc(entry.word)}</div>
+          ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
+        </div>
+        <button class="audio-btn" type="button" id="review-audio" aria-label="Pronunciation">🔊</button>
+      </div>
+      <div class="step open" style="padding:16px">
+        <p class="muted" style="margin-bottom:12px">Can you recall what it means?</p>
+        <div id="review-answer" hidden>
+          ${def ? `<div class="def-item">${esc(def.definition)}
+            ${def.definitionRu ? `<div class="def-ru">🇷🇺 ${esc(def.definitionRu)}</div>` : ''}
+            ${def.example ? `<div class="def-example">“${esc(def.example)}”</div>` : ''}</div>` : ''}
+          ${!def && entry.translation ? `<p>🇷🇺 ${esc(entry.translation)}</p>` : ''}
+          ${entry.note ? `<p style="margin-top:8px">📝 <span class="muted">${esc(entry.note)}</span></p>` : ''}
+        </div>
+        <button class="btn btn-ghost btn-block" id="review-show" style="margin-top:4px">👁 Show meaning</button>
+        ${verdictButtons}
+      </div>`;
+    $('#review-audio').addEventListener('click', playWord);
+    $('#review-show').addEventListener('click', () => {
+      $('#review-answer').hidden = false;
+      $('#review-show').hidden = true;
+      $('#review-verdict').hidden = false;
+    });
+    bindVerdict();
+    return;
+  }
+
+  if (type === 'production') {
+    // Cue shown → recall the EN word out loud, then check yourself
+    reviewArea.innerHTML = `${progress}
+      <div class="step open" style="padding:16px">
+        <p class="muted">What’s the English word for:</p>
+        <p class="review-cue">${reviewCue(entry)}</p>
+        <div id="review-answer" hidden>
+          <div class="word-title" style="font-size:22px">${esc(entry.word)}
+            <button class="audio-btn" type="button" id="review-audio" style="width:38px;height:38px;font-size:16px;vertical-align:middle" aria-label="Pronunciation">🔊</button>
+          </div>
+          ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
+        </div>
+        <button class="btn btn-ghost btn-block" id="review-show" style="margin-top:4px">👁 Show answer</button>
+        ${verdictButtons}
+      </div>`;
+    $('#review-audio').addEventListener('click', playWord);
+    $('#review-show').addEventListener('click', () => {
+      $('#review-answer').hidden = false;
+      $('#review-show').hidden = true;
+      $('#review-verdict').hidden = false;
+    });
+    bindVerdict();
+    return;
+  }
+
+  // Typing card: cue shown → type the EN word from memory
+  reviewArea.innerHTML = `${progress}
+    <div class="step open" style="padding:16px">
+      <p class="muted">Type the English word for:</p>
+      <p class="review-cue">${reviewCue(entry)}</p>
+      <form id="typing-form" class="typing-row" autocomplete="off">
+        <input id="typing-input" type="text" inputmode="latin" autocapitalize="off"
+               autocorrect="off" spellcheck="false" placeholder="Type it…" aria-label="Your answer">
+        <button class="btn btn-primary" type="submit">Check</button>
+      </form>
+      <div id="typing-result" hidden></div>
+    </div>`;
+  const input = $('#typing-input');
+  input.focus();
+  $('#typing-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const given = normalizeAnswer(input.value);
+    if (!given) return;
+    const target = normalizeAnswer(entry.word);
+    const dist = levenshtein(given, target);
+    const correct = dist === 0;
+    const close = !correct && dist === 1 && target.length >= 5;
+    const result = $('#typing-result');
+    $('#typing-form').hidden = true;
+    result.hidden = false;
+    result.innerHTML = `
+      <p class="${correct || close ? 'result-ok' : 'result-bad'}" style="font-size:19px;font-weight:700;margin-top:10px">
+        ${correct ? '✅' : close ? '🟡' : '❌'} ${esc(entry.word)}
+        <button class="audio-btn" type="button" id="review-audio" style="width:38px;height:38px;font-size:16px;vertical-align:middle" aria-label="Pronunciation">🔊</button>
+      </p>
+      ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
+      ${close ? `<p class="muted" style="margin-top:6px">Almost — you wrote “${esc(input.value.trim())}”. Watch the spelling.</p>` : ''}
+      ${!correct && !close ? `<p class="muted" style="margin-top:6px">You wrote “${esc(input.value.trim())}”.</p>` : ''}
+      <button class="btn ${correct || close ? 'btn-primary' : 'btn-ghost'} btn-block" id="typing-continue">Continue</button>`;
+    $('#review-audio').addEventListener('click', playWord);
+    playWord();
+    $('#typing-continue').addEventListener('click', () => answerReview(entry, correct || close));
   });
-  $('#review-show').addEventListener('click', () => {
-    $('#review-answer').hidden = false;
-    $('#review-show').hidden = true;
-    $('#review-verdict').hidden = false;
-  });
-  $('#review-forgot').addEventListener('click', () => answerReview(entry, false));
-  $('#review-knew').addEventListener('click', () => answerReview(entry, true));
 }
 
 function answerReview(entry, knew) {
