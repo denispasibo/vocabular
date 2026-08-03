@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Vocabular</title>
+  <meta name="description" content="Learn English words with a checklist: meaning, pronunciation, examples, synonyms, etymology and Playphrase.">
+  <meta name="theme-color" content="#4F46E5">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Vocabular">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>Vocabular</h1>
+    <p class="tagline">word → checklist → dictionary</p>
+  </header>
+
+  <main id="main">
+    <!-- Screen: new word -->
+    <section id="screen-study" class="screen">
+      <form id="search-form" class="search-form" autocomplete="off">
+        <input id="search-input" type="text" inputmode="latin"
+               placeholder="Type a word or phrase…" aria-label="Word or phrase" required>
+        <button type="submit" class="btn btn-primary" id="search-btn">Study</button>
+      </form>
+
+      <div id="study-area" class="study-area" hidden></div>
+
+      <div id="study-empty" class="empty-state">
+        <div class="empty-icon">📖</div>
+        <p>Came across a new word?<br>Type it in and walk through the checklist:</p>
+        <ol class="mini-checklist">
+          <li>Meaning</li>
+          <li>Pronunciation</li>
+          <li>Explanation &amp; example</li>
+          <li>Similar words</li>
+          <li>Other meanings</li>
+          <li>History &amp; origin</li>
+          <li>See it in action — Playphrase</li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- Screen: review (spaced repetition) -->
+    <section id="screen-review" class="screen" hidden>
+      <div id="review-area"></div>
+    </section>
+
+    <!-- Screen: dictionary -->
+    <section id="screen-dict" class="screen" hidden>
+      <div class="dict-toolbar">
+        <input id="dict-search" type="search" placeholder="Search your dictionary…" aria-label="Search your dictionary">
+        <div class="dict-actions">
+          <button class="btn btn-ghost btn-small" type="button" id="export-btn">⬇ Export</button>
+          <button class="btn btn-ghost btn-small" type="button" id="import-btn">⬆ Import</button>
+          <input type="file" id="import-file" accept="application/json" hidden>
+        </div>
+      </div>
+      <ul id="dict-list" class="dict-list"></ul>
+      <div id="dict-empty" class="empty-state" hidden>
+        <div class="empty-icon">🗂</div>
+        <p>Your dictionary is empty.<br>Words you study will appear here.</p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" role="tablist">
+    <button class="tab active" id="tab-study" role="tab" aria-selected="true">
+      <span class="tab-icon">✏️</span> New word
+    </button>
+    <button class="tab" id="tab-review" role="tab" aria-selected="false">
+      <span class="tab-icon">🔁</span> Review <span id="review-count" class="badge badge-alert" hidden></span>
+    </button>
+    <button class="tab" id="tab-dict" role="tab" aria-selected="false">
+      <span class="tab-icon">📚</span> Dictionary <span id="dict-count" class="badge" hidden></span>
+    </button>
+  </nav>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

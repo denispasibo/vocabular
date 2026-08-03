@@ -1,0 +1,773 @@
+/* Vocabular — checklist-based word study, everything inline */
+'use strict';
+
+const STORAGE_KEY = 'vocabular.words.v1';
+
+const $ = (sel) => document.querySelector(sel);
+const studyArea = $('#study-area');
+const studyEmpty = $('#study-empty');
+const searchForm = $('#search-form');
+const searchInput = $('#search-input');
+const dictList = $('#dict-list');
+const dictEmpty = $('#dict-empty');
+const dictSearch = $('#dict-search');
+const dictCount = $('#dict-count');
+const reviewArea = $('#review-area');
+const reviewCount = $('#review-count');
+
+let currentEntry = null; // word currently being studied
+
+/* ---------- Spaced repetition ---------- */
+
+const SRS_INTERVALS = [1, 3, 7, 21, 60]; // days until next review, per stage
+const DAY = 86400000;
+
+function newSrs() {
+  return { stage: 0, due: Date.now() + DAY };
+}
+
+function dueWords(words) {
+  return (words || loadWords()).filter((x) => x.srs && x.srs.due <= Date.now());
+}
+
+/* ---------- Storage ---------- */
+
+function loadWords() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveWords(words) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(words));
+  updateCounts();
+}
+
+function updateCounts() {
+  const words = loadWords();
+  dictCount.hidden = words.length === 0;
+  dictCount.textContent = words.length;
+  const due = dueWords(words).length;
+  reviewCount.hidden = due === 0;
+  reviewCount.textContent = due;
+}
+
+/* ---------- Helpers ---------- */
+
+function esc(s) {
+  const div = document.createElement('div');
+  div.textContent = s ?? '';
+  return div.innerHTML;
+}
+
+function stripHtml(html) {
+  const doc = new DOMParser().parseFromString(html || '', 'text/html');
+  return doc.body.textContent.replace(/\s+/g, ' ').trim();
+}
+
+function showToast(msg) {
+  const toast = $('#toast');
+  toast.textContent = msg;
+  toast.hidden = false;
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { toast.hidden = true; }, 2200);
+}
+
+function playphraseLink(word) {
+  return 'https://www.playphrase.me/#/search?q=' + encodeURIComponent(word);
+}
+
+/* ---------- Speech (works offline, for any word or phrase) ---------- */
+
+function speak(text, rate = 0.92) {
+  if (!('speechSynthesis' in window)) {
+    showToast('Speech is not supported in this browser');
+    return;
+  }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'en-US';
+  u.rate = rate;
+  const voice = speechSynthesis.getVoices()
+    .find((v) => v.lang.startsWith('en') && v.localService) ||
+    speechSynthesis.getVoices().find((v) => v.lang.startsWith('en'));
+  if (voice) u.voice = voice;
+  speechSynthesis.speak(u);
+}
+// Some browsers load voices asynchronously — warm them up
+if ('speechSynthesis' in window) speechSynthesis.getVoices();
+
+/* ---------- API requests (with retries and fallbacks) ---------- */
+
+async function fetchJson(url, tries = 2) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return await res.json();
+    } catch { /* retry */ }
+  }
+  return null;
+}
+
+async function fetchDictionary(word) {
+  const data = await fetchJson(
+    'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word)
+  );
+  return Array.isArray(data) && data.length ? data : null;
+}
+
+// Fallback: Wiktionary REST — stable, supports phrases ("piece of cake")
+async function fetchWiktionaryDefs(word) {
+  const page = word.trim().replace(/\s+/g, '_');
+  const data = await fetchJson(
+    'https://en.wiktionary.org/api/rest_v1/page/definition/' + encodeURIComponent(page)
+  );
+  const groups = data?.en;
+  if (!groups?.length) return null;
+
+  const meanings = groups.map((g) => ({
+    partOfSpeech: (g.partOfSpeech || '').toLowerCase(),
+    definitions: (g.definitions || [])
+      .map((d) => ({
+        definition: stripHtml(d.definition),
+        example: stripHtml((d.parsedExamples?.[0]?.example) || d.examples?.[0] || ''),
+      }))
+      .filter((d) => d.definition)
+      .slice(0, 4),
+  })).filter((m) => m.definitions.length);
+
+  return meanings.length ? meanings : null;
+}
+
+async function fetchDatamuseSynonyms(word) {
+  const syn = await fetchJson(
+    'https://api.datamuse.com/words?rel_syn=' + encodeURIComponent(word) + '&max=14'
+  ) || [];
+  if (syn.length >= 4) return syn.map((x) => x.word);
+  // Not enough strict synonyms — add similar-meaning words (works for phrases)
+  const similar = await fetchJson(
+    'https://api.datamuse.com/words?ml=' + encodeURIComponent(word) + '&max=14'
+  ) || [];
+  const merged = [...syn.map((x) => x.word)];
+  for (const x of similar) {
+    if (!merged.includes(x.word) && x.word !== word.toLowerCase()) merged.push(x.word);
+  }
+  return merged.slice(0, 14);
+}
+
+// Batch-translate an array of strings to Russian in one request.
+// Strings are joined with newlines; the response preserves them.
+async function translateTexts(texts) {
+  const clean = texts.map((t) => (t || '').replace(/\s+/g, ' ').trim());
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ru&dt=t&q=' +
+    encodeURIComponent(clean.join('\n'));
+  const data = await fetchJson(url);
+  const segs = data?.[0];
+  if (!segs) return null;
+  const full = segs.map((s) => s[0] || '').join('');
+  const lines = full.split('\n').map((s) => s.trim());
+  return lines.length === clean.length ? lines : null;
+}
+
+// Attach Russian translations to the word and all its definitions
+async function addTranslations(entry) {
+  const texts = [entry.word];
+  const refs = [];
+  for (const m of entry.meanings) {
+    for (const d of m.definitions) {
+      texts.push(d.definition);
+      refs.push(d);
+    }
+  }
+  const tr = await translateTexts(texts).catch(() => null);
+  if (!tr) return;
+  if (tr[0] && tr[0].toLowerCase() !== entry.word.toLowerCase()) {
+    entry.translation = tr[0];
+  }
+  refs.forEach((d, i) => { d.definitionRu = tr[i + 1] || ''; });
+}
+
+async function fetchEtymology(word) {
+  const base = 'https://en.wiktionary.org/w/api.php?format=json&origin=*&action=parse&page=' +
+    encodeURIComponent(word);
+  const secData = await fetchJson(base + '&prop=sections');
+  const sections = secData?.parse?.sections || [];
+  const etySec = sections.find((s) => /^Etymology/.test(s.line));
+  if (!etySec) return null;
+
+  const txtData = await fetchJson(base + '&prop=text&section=' + etySec.index);
+  const html = txtData?.parse?.text?.['*'];
+  if (!html) return null;
+
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const paras = [...doc.querySelectorAll('p')]
+    .map((p) => p.textContent.replace(/\[\d+\]/g, '').trim())
+    .filter((t) => t.length > 20);
+  if (!paras.length) return null;
+  return paras.slice(0, 2).join('\n\n');
+}
+
+/* ---------- Building the word entry ---------- */
+
+function extractEntry(word, apiData, wikiMeanings, datamuseSyns, etymology) {
+  const entry = {
+    id: word.toLowerCase(),
+    word,
+    phonetic: '',
+    audio: '',
+    translation: '',
+    meanings: [],
+    synonyms: [],
+    antonyms: [],
+    etymology: etymology || '',
+    note: '',
+    addedAt: null,
+  };
+
+  if (apiData) {
+    for (const item of apiData) {
+      if (!entry.phonetic && item.phonetic) entry.phonetic = item.phonetic;
+      for (const ph of item.phonetics || []) {
+        if (!entry.phonetic && ph.text) entry.phonetic = ph.text;
+        if (!entry.audio && ph.audio) entry.audio = ph.audio;
+      }
+      for (const m of item.meanings || []) {
+        entry.meanings.push({
+          partOfSpeech: m.partOfSpeech,
+          // keep synonyms attached to their sense — mixing them is confusing
+          synonyms: (m.synonyms || []).slice(0, 10),
+          definitions: (m.definitions || []).slice(0, 4).map((d) => ({
+            definition: d.definition,
+            example: d.example || '',
+          })),
+        });
+        for (const s of m.synonyms || []) {
+          if (!entry.synonyms.includes(s)) entry.synonyms.push(s);
+        }
+        for (const a of m.antonyms || []) {
+          if (!entry.antonyms.includes(a)) entry.antonyms.push(a);
+        }
+      }
+    }
+  }
+
+  // Fallback definitions from Wiktionary if the main API gave nothing
+  if (!entry.meanings.length && wikiMeanings) {
+    entry.meanings = wikiMeanings;
+  }
+
+  // Datamuse is a fallback only — it can't tell word senses apart
+  if (!entry.synonyms.length && datamuseSyns) {
+    entry.synonyms = datamuseSyns;
+  }
+
+  return entry;
+}
+
+/* ---------- YouGlish widget (inline "word in action") ---------- */
+
+let ygPending = null;
+let ygScriptRequested = false;
+let ygWidget = null;
+let ygShownFor = '';
+
+window.onYouglishAPIReady = () => {
+  if (ygPending) {
+    const w = ygPending;
+    ygPending = null;
+    mountYouglish(w);
+  }
+};
+
+function mountYouglish(word) {
+  const container = document.getElementById('yg-widget');
+  if (!container) return;
+  container.innerHTML = '';
+  const holder = document.createElement('div');
+  holder.id = 'yg-widget-inner';
+  container.appendChild(holder);
+  ygWidget = new YG.Widget('yg-widget-inner', {
+    width: Math.min(600, container.clientWidth || 600),
+    autoStart: 0,
+  });
+  ygWidget.fetch(word, 'english');
+  ygShownFor = word;
+}
+
+function initYouglish(word) {
+  if (ygShownFor === word && document.getElementById('yg-widget-inner')) return;
+  if (window.YG) {
+    mountYouglish(word);
+    return;
+  }
+  ygPending = word;
+  if (!ygScriptRequested) {
+    ygScriptRequested = true;
+    const s = document.createElement('script');
+    s.src = 'https://youglish.com/public/emb/widget.js';
+    s.async = true;
+    document.head.appendChild(s);
+  }
+}
+
+/* ---------- Rendering the checklist ---------- */
+
+function stepHtml(num, title, bodyHtml, open = false) {
+  return `
+    <div class="step${open ? ' open done' : ''}" data-step="${num}">
+      <button class="step-header" type="button">
+        <span class="step-num">${num}</span>
+        <span>${title}</span>
+        <span class="step-chevron">›</span>
+      </button>
+      <div class="step-body">${bodyHtml}</div>
+    </div>`;
+}
+
+function renderStudy(entry, { saved = false } = {}) {
+  currentEntry = entry;
+  ygShownFor = '';
+  studyEmpty.hidden = true;
+  studyArea.hidden = false;
+
+  const w = entry.word;
+  const hasData = entry.meanings.length > 0;
+
+  // English definition + Russian translation + example, as one block
+  const defBlock = (d) => `<div class="def-item">${esc(d.definition)}
+    ${d.definitionRu ? `<div class="def-ru">🇷🇺 <span class="ru-blur" title="Tap to reveal">${esc(d.definitionRu)}</span></div>` : ''}
+    ${d.example ? `<div class="def-example">“${esc(d.example)}”</div>` : ''}</div>`;
+
+  // 1. Meaning
+  const firstDef = hasData ? entry.meanings[0].definitions[0] : null;
+  const step1 = `
+    ${entry.translation ? `<p class="word-translation">🇷🇺 <span class="ru-blur" title="Tap to reveal">${esc(entry.translation)}</span></p>` : ''}
+    ${firstDef
+      ? defBlock(firstDef)
+      : (entry.translation
+          ? ''
+          : `<p class="muted">No dictionary definition found. Check the spelling, or use your note below to write the meaning down yourself.</p>`)}`;
+
+  // 2. Pronunciation — always available inline (audio file or browser speech)
+  const step2 = `
+    ${entry.phonetic ? `<p class="word-phonetic">${esc(entry.phonetic)}</p>` : ''}
+    <div class="chip-row">
+      <button class="btn btn-ghost" type="button" id="play-audio">🔊 Listen</button>
+      <button class="btn btn-ghost" type="button" id="play-slow">🐢 Slow</button>
+    </div>
+    ${!entry.audio ? '<p class="muted" style="margin-top:8px;font-size:13.5px">Using browser voice.</p>' : ''}`;
+
+  // 3. Explanation & example
+  let step3 = '';
+  if (hasData) {
+    const m = entry.meanings[0];
+    if (m.partOfSpeech) step3 += `<span class="pos-label">${esc(m.partOfSpeech)}</span>`;
+    for (const d of m.definitions) {
+      step3 += defBlock(d);
+    }
+  } else {
+    step3 = `<p class="muted">No explanation available — watch real usage in step 7.</p>`;
+  }
+
+  // 4. Similar words — grouped by sense when the dictionary provides that
+  const chipRow = (words) => `<div class="chip-row">${words
+    .map((s) => `<button class="chip" type="button" data-lookup="${esc(s)}">${esc(s)}</button>`)
+    .join('')}</div>`;
+
+  let step4 = '';
+  const sensesWithSyns = entry.meanings.filter((m) => m.synonyms?.length);
+  if (sensesWithSyns.length) {
+    for (const m of sensesWithSyns) {
+      const senseHint = m.definitions[0]?.definition || '';
+      step4 += `<div style="margin-bottom:6px">
+        ${m.partOfSpeech ? `<span class="pos-label">${esc(m.partOfSpeech)}</span>` : ''}
+        ${senseHint ? `<span class="muted" style="font-size:13px"> — ${esc(senseHint.length > 70 ? senseHint.slice(0, 70) + '…' : senseHint)}</span>` : ''}
+      </div>${chipRow(m.synonyms.slice(0, 10))}<div style="height:10px"></div>`;
+    }
+  } else if (entry.synonyms.length) {
+    step4 = chipRow(entry.synonyms.slice(0, 14)) +
+      `<p class="muted" style="margin-top:10px;font-size:13px">Related words across all senses of “${esc(w)}”.</p>`;
+  } else {
+    step4 = `<p class="muted">No similar words found.</p>`;
+  }
+  if (step4 && (sensesWithSyns.length || entry.synonyms.length)) {
+    if (entry.antonyms.length) {
+      step4 += `<p style="margin-top:6px"><strong>Antonyms:</strong> <span class="muted">${entry.antonyms.slice(0, 8).map(esc).join(', ')}</span></p>`;
+    }
+    step4 += `<p class="muted" style="margin-top:8px;font-size:13.5px">Tap a word to study it.</p>`;
+  }
+
+  // 5. Other meanings
+  let step5 = '';
+  if (entry.meanings.length > 1) {
+    for (const m of entry.meanings.slice(1)) {
+      if (m.partOfSpeech) step5 += `<span class="pos-label">${esc(m.partOfSpeech)}</span>`;
+      for (const d of m.definitions.slice(0, 2)) {
+        step5 += defBlock(d);
+      }
+    }
+  } else {
+    step5 = `<p class="muted">No other meanings in the dictionary.</p>`;
+  }
+
+  // 6. History & origin
+  const step6 = entry.etymology
+    ? `<p style="white-space:pre-line">${esc(entry.etymology)}</p>`
+    : `<p class="muted">No etymology found for this entry.</p>`;
+
+  // 7. See it in action — YouGlish player inline, Playphrase as a backup link
+  const step7 = `
+    <div id="yg-widget"><p class="muted">Loading videos…</p></div>
+    <p class="muted" style="margin-top:10px;font-size:13.5px">
+      Real YouTube clips with “${esc(w)}”. Also try
+      <a class="ext-link" style="margin:0;font-size:13.5px" href="${playphraseLink(w)}" target="_blank" rel="noopener">Playphrase.me ↗</a>
+      (movie scenes — it can’t be embedded, opens in a new tab).
+    </p>`;
+
+  studyArea.innerHTML = `
+    <div class="word-head">
+      <div>
+        <div class="word-title">${esc(w)}</div>
+        ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
+      </div>
+      <button class="audio-btn" type="button" id="play-audio-head" aria-label="Pronunciation">🔊</button>
+    </div>
+    ${stepHtml(1, 'Meaning', step1, true)}
+    ${stepHtml(2, 'Pronunciation', step2)}
+    ${stepHtml(3, 'Explanation & example', step3)}
+    ${stepHtml(4, 'Similar words', step4)}
+    ${stepHtml(5, 'Other meanings', step5)}
+    ${stepHtml(6, 'History & origin', step6)}
+    ${stepHtml(7, 'See it in action', step7)}
+    <div class="step open" style="padding:14px 16px">
+      <label style="font-weight:600;font-size:15px">📝 My note</label>
+      <textarea class="note-field" id="note-field" placeholder="Translation, association, where you came across it…">${esc(entry.note)}</textarea>
+    </div>
+    <button class="btn btn-primary btn-block" id="save-btn">
+      ${saved ? '💾 Update in dictionary' : '💾 Save to dictionary'}
+    </button>
+    ${saved ? `<button class="btn btn-danger btn-block" id="delete-btn">Remove from dictionary</button>` : ''}
+  `;
+
+  bindStudyEvents(entry, saved);
+  window.scrollTo({ top: 0 });
+}
+
+function bindStudyEvents(entry, saved) {
+  // Russian translations are blurred until tapped (so English gets read first)
+  studyArea.querySelectorAll('.ru-blur').forEach((el) => {
+    el.addEventListener('click', () => el.classList.toggle('revealed'));
+  });
+
+  // Expand/collapse steps; lazy-load the video widget when step 7 opens
+  studyArea.querySelectorAll('.step-header').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const step = btn.closest('.step');
+      step.classList.toggle('open');
+      step.classList.add('done');
+      if (step.dataset.step === '7' && step.classList.contains('open')) {
+        initYouglish(entry.word);
+      }
+    });
+  });
+
+  // Pronunciation: audio file if we have one, browser speech otherwise
+  const playAudio = () => {
+    if (entry.audio) {
+      new Audio(entry.audio).play().catch(() => speak(entry.word));
+    } else {
+      speak(entry.word);
+    }
+  };
+  $('#play-audio')?.addEventListener('click', playAudio);
+  $('#play-audio-head')?.addEventListener('click', playAudio);
+  $('#play-slow')?.addEventListener('click', () => speak(entry.word, 0.55));
+
+  // Tap a synonym to study it
+  studyArea.querySelectorAll('[data-lookup]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      searchInput.value = chip.dataset.lookup;
+      lookupWord(chip.dataset.lookup);
+    });
+  });
+
+  // Save
+  $('#save-btn').addEventListener('click', () => {
+    entry.note = $('#note-field').value.trim();
+    const words = loadWords();
+    const idx = words.findIndex((x) => x.id === entry.id);
+    if (idx >= 0) {
+      entry.addedAt = words[idx].addedAt;
+      entry.srs = words[idx].srs || newSrs();
+      words[idx] = entry;
+    } else {
+      entry.addedAt = Date.now();
+      entry.srs = newSrs();
+      words.unshift(entry);
+    }
+    saveWords(words);
+    showToast(idx >= 0 ? 'Updated ✓' : 'Saved to dictionary ✓');
+    renderStudy(entry, { saved: true });
+  });
+
+  // Delete
+  $('#delete-btn')?.addEventListener('click', () => {
+    if (!confirm(`Remove “${entry.word}” from your dictionary?`)) return;
+    saveWords(loadWords().filter((x) => x.id !== entry.id));
+    showToast('Removed');
+    studyArea.hidden = true;
+    studyEmpty.hidden = false;
+    searchInput.value = '';
+    renderDict();
+  });
+}
+
+/* ---------- Word lookup ---------- */
+
+async function lookupWord(word) {
+  word = word.trim();
+  if (!word) return;
+
+  showScreen('study');
+  studyEmpty.hidden = true;
+  studyArea.hidden = false;
+  studyArea.innerHTML = '<div class="spinner" role="status" aria-label="Loading"></div>';
+
+  // If the word is already saved, keep its note and date
+  const existing = loadWords().find((x) => x.id === word.toLowerCase());
+
+  const [apiData, wikiMeanings, datamuseSyns, etymology] = await Promise.all([
+    fetchDictionary(word).catch(() => null),
+    fetchWiktionaryDefs(word).catch(() => null),
+    fetchDatamuseSynonyms(word).catch(() => null),
+    fetchEtymology(word).catch(() => null),
+  ]);
+
+  const gotAnything = apiData || wikiMeanings || (datamuseSyns && datamuseSyns.length) || etymology;
+  if (!gotAnything && !navigator.onLine) {
+    if (existing) {
+      renderStudy(existing, { saved: true });
+    } else {
+      studyArea.innerHTML = `<div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <p>Couldn’t load the data.<br>Check your internet connection.</p>
+      </div>`;
+    }
+    return;
+  }
+
+  const entry = extractEntry(word, apiData, wikiMeanings, datamuseSyns, etymology);
+  await addTranslations(entry).catch(() => {});
+  if (existing) {
+    entry.note = existing.note;
+    entry.addedAt = existing.addedAt;
+    entry.srs = existing.srs;
+  }
+  renderStudy(entry, { saved: !!existing });
+}
+
+/* ---------- Dictionary ---------- */
+
+function renderDict(filter = '') {
+  const words = loadWords().filter((x) =>
+    x.word.toLowerCase().includes(filter.toLowerCase()) ||
+    (x.note || '').toLowerCase().includes(filter.toLowerCase())
+  );
+
+  dictEmpty.hidden = words.length > 0 || filter !== '';
+  dictList.innerHTML = words.map((x) => {
+    const sub = x.note || x.meanings[0]?.definitions[0]?.definition || '';
+    const date = x.addedAt
+      ? new Date(x.addedAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })
+      : '';
+    return `<li class="dict-item" data-id="${esc(x.id)}">
+      <div class="dict-item-main">
+        <div class="dict-item-word">${esc(x.word)}</div>
+        ${sub ? `<div class="dict-item-sub">${esc(sub)}</div>` : ''}
+      </div>
+      <span class="dict-item-date">${date}</span>
+    </li>`;
+  }).join('');
+
+  dictList.querySelectorAll('.dict-item').forEach((li) => {
+    li.addEventListener('click', () => {
+      const entry = loadWords().find((x) => x.id === li.dataset.id);
+      if (!entry) return;
+      searchInput.value = entry.word;
+      showScreen('study');
+      renderStudy(entry, { saved: true });
+    });
+  });
+}
+
+/* ---------- Review (spaced repetition) ---------- */
+
+let reviewQueue = [];
+let reviewDone = 0;
+
+function startReview() {
+  reviewQueue = dueWords().sort(() => Math.random() - 0.5);
+  reviewDone = 0;
+  renderReviewCard();
+}
+
+function renderReviewCard() {
+  if (!reviewQueue.length) {
+    const withSrs = loadWords().filter((x) => x.srs);
+    const next = withSrs.sort((a, b) => a.srs.due - b.srs.due)[0];
+    const nextStr = next
+      ? `Next review: <strong>${esc(next.word)}</strong> on ${new Date(next.srs.due).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}.`
+      : 'Save some words first — they’ll show up here for review.';
+    reviewArea.innerHTML = `<div class="empty-state">
+      <div class="empty-icon">${reviewDone ? '🎉' : '✅'}</div>
+      <p>${reviewDone
+        ? `Done! You reviewed ${reviewDone} ${reviewDone === 1 ? 'word' : 'words'}.`
+        : 'Nothing to review right now.'}<br>${nextStr}</p>
+    </div>`;
+    return;
+  }
+
+  const entry = reviewQueue[0];
+  const def = entry.meanings[0]?.definitions[0];
+  reviewArea.innerHTML = `
+    <p class="review-progress muted">${reviewDone + 1} / ${reviewDone + reviewQueue.length}</p>
+    <div class="word-head">
+      <div>
+        <div class="word-title">${esc(entry.word)}</div>
+        ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
+      </div>
+      <button class="audio-btn" type="button" id="review-audio" aria-label="Pronunciation">🔊</button>
+    </div>
+    <div class="step open" style="padding:16px">
+      <p class="muted" style="margin-bottom:12px">Can you recall what it means?</p>
+      <div id="review-answer" hidden>
+        ${def ? `<div class="def-item">${esc(def.definition)}
+          ${def.definitionRu ? `<div class="def-ru">🇷🇺 ${esc(def.definitionRu)}</div>` : ''}
+          ${def.example ? `<div class="def-example">“${esc(def.example)}”</div>` : ''}</div>` : ''}
+        ${!def && entry.translation ? `<p>🇷🇺 ${esc(entry.translation)}</p>` : ''}
+        ${entry.note ? `<p style="margin-top:8px">📝 <span class="muted">${esc(entry.note)}</span></p>` : ''}
+      </div>
+      <button class="btn btn-ghost btn-block" id="review-show" style="margin-top:4px">👁 Show meaning</button>
+      <div id="review-verdict" class="review-verdict" hidden>
+        <button class="btn btn-ghost btn-forgot" id="review-forgot">❌ Forgot</button>
+        <button class="btn btn-primary" id="review-knew">✅ Got it</button>
+      </div>
+    </div>`;
+
+  $('#review-audio').addEventListener('click', () => {
+    if (entry.audio) new Audio(entry.audio).play().catch(() => speak(entry.word));
+    else speak(entry.word);
+  });
+  $('#review-show').addEventListener('click', () => {
+    $('#review-answer').hidden = false;
+    $('#review-show').hidden = true;
+    $('#review-verdict').hidden = false;
+  });
+  $('#review-forgot').addEventListener('click', () => answerReview(entry, false));
+  $('#review-knew').addEventListener('click', () => answerReview(entry, true));
+}
+
+function answerReview(entry, knew) {
+  const words = loadWords();
+  const stored = words.find((x) => x.id === entry.id);
+  if (stored) {
+    const stage = knew ? Math.min((stored.srs?.stage ?? 0) + 1, SRS_INTERVALS.length - 1) : 0;
+    stored.srs = { stage, due: Date.now() + SRS_INTERVALS[stage] * DAY };
+    saveWords(words);
+  }
+  reviewQueue.shift();
+  reviewDone++;
+  renderReviewCard();
+}
+
+/* ---------- Navigation ---------- */
+
+function showScreen(name) {
+  for (const key of ['study', 'review', 'dict']) {
+    $('#screen-' + key).hidden = key !== name;
+    const tab = $('#tab-' + key);
+    tab.classList.toggle('active', key === name);
+    tab.setAttribute('aria-selected', key === name);
+  }
+  if (name === 'dict') renderDict(dictSearch.value.trim());
+  if (name === 'review') startReview();
+}
+
+/* ---------- Export / import ---------- */
+
+$('#export-btn').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(loadWords(), null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'vocabular-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('Dictionary exported');
+});
+
+$('#import-btn').addEventListener('click', () => $('#import-file').click());
+$('#import-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (!Array.isArray(data)) throw new Error('not an array');
+    const words = loadWords();
+    let added = 0;
+    for (const w of data) {
+      if (w && w.id && w.word && !words.some((x) => x.id === w.id)) {
+        words.push(w);
+        added++;
+      }
+    }
+    saveWords(words);
+    renderDict(dictSearch.value.trim());
+    showToast(added ? `Imported ${added} ${added === 1 ? 'word' : 'words'}` : 'Nothing new to import');
+  } catch {
+    showToast('Invalid backup file');
+  }
+  e.target.value = '';
+});
+
+/* ---------- Init ---------- */
+
+searchForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  lookupWord(searchInput.value);
+  searchInput.blur();
+});
+
+$('#tab-study').addEventListener('click', () => showScreen('study'));
+$('#tab-review').addEventListener('click', () => showScreen('review'));
+$('#tab-dict').addEventListener('click', () => showScreen('dict'));
+dictSearch.addEventListener('input', () => renderDict(dictSearch.value.trim()));
+
+// One-time migration: words saved before spaced repetition existed become due now
+(() => {
+  const words = loadWords();
+  let changed = false;
+  for (const w of words) {
+    if (!w.srs) {
+      w.srs = { stage: 0, due: Date.now() };
+      changed = true;
+    }
+  }
+  if (changed) saveWords(words);
+})();
+
+updateCounts();
+
+// Support ?q=word links (e.g. from an iOS Shortcut)
+const initialQuery = new URLSearchParams(location.search).get('q');
+if (initialQuery) {
+  searchInput.value = initialQuery;
+  lookupWord(initialQuery);
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
