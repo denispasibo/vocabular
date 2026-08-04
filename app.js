@@ -2,6 +2,18 @@
 'use strict';
 
 const STORAGE_KEY = 'vocabular.words.v1';
+const LANG_KEY = 'vocabular.lang.v1';
+
+const LANGS = {
+  en: { speech: 'en-US', youglish: 'english', wikiKey: 'en', wikiSection: 'English', datamuseExtra: '' },
+  es: { speech: 'es-ES', youglish: 'spanish', wikiKey: 'es', wikiSection: 'Spanish', datamuseExtra: '&v=es' },
+};
+
+let currentLang = localStorage.getItem(LANG_KEY) === 'es' ? 'es' : 'en';
+
+function langOf(x) {
+  return x.lang || 'en';
+}
 
 const $ = (sel) => document.querySelector(sel);
 const studyArea = $('#study-area');
@@ -27,7 +39,9 @@ function newSrs() {
 }
 
 function dueWords(words) {
-  return (words || loadWords()).filter((x) => x.srs && x.srs.due <= Date.now());
+  return (words || loadWords()).filter(
+    (x) => x.srs && x.srs.due <= Date.now() && langOf(x) === currentLang
+  );
 }
 
 /* ---------- Storage ---------- */
@@ -46,10 +60,10 @@ function saveWords(words) {
 }
 
 function updateCounts() {
-  const words = loadWords();
+  const words = loadWords().filter((x) => langOf(x) === currentLang);
   dictCount.hidden = words.length === 0;
   dictCount.textContent = words.length;
-  const due = dueWords(words).length;
+  const due = dueWords().length;
   reviewCount.hidden = due === 0;
   reviewCount.textContent = due;
 }
@@ -81,18 +95,20 @@ function playphraseLink(word) {
 
 /* ---------- Speech (works offline, for any word or phrase) ---------- */
 
-function speak(text, rate = 0.92) {
+function speak(text, rate = 0.92, lang = 'en') {
   if (!('speechSynthesis' in window)) {
     showToast('Speech is not supported in this browser');
     return;
   }
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'en-US';
+  const speech = LANGS[lang]?.speech || 'en-US';
+  u.lang = speech;
   u.rate = rate;
+  const prefix = speech.slice(0, 2);
   const voice = speechSynthesis.getVoices()
-    .find((v) => v.lang.startsWith('en') && v.localService) ||
-    speechSynthesis.getVoices().find((v) => v.lang.startsWith('en'));
+    .find((v) => v.lang.startsWith(prefix) && v.localService) ||
+    speechSynthesis.getVoices().find((v) => v.lang.startsWith(prefix));
   if (voice) u.voice = voice;
   speechSynthesis.speak(u);
 }
@@ -118,13 +134,13 @@ async function fetchDictionary(word) {
   return Array.isArray(data) && data.length ? data : null;
 }
 
-// Fallback: Wiktionary REST — stable, supports phrases ("piece of cake")
-async function fetchWiktionaryDefs(word) {
+// Wiktionary REST — stable, supports phrases ("piece of cake") and Spanish words
+async function fetchWiktionaryDefs(word, lang = 'en') {
   const page = word.trim().replace(/\s+/g, '_');
   const data = await fetchJson(
     'https://en.wiktionary.org/api/rest_v1/page/definition/' + encodeURIComponent(page)
   );
-  const groups = data?.en;
+  const groups = data?.[LANGS[lang].wikiKey];
   if (!groups?.length) return null;
 
   const meanings = groups.map((g) => ({
@@ -141,14 +157,17 @@ async function fetchWiktionaryDefs(word) {
   return meanings.length ? meanings : null;
 }
 
-async function fetchDatamuseSynonyms(word) {
-  const syn = await fetchJson(
-    'https://api.datamuse.com/words?rel_syn=' + encodeURIComponent(word) + '&max=14'
-  ) || [];
+async function fetchDatamuseSynonyms(word, lang = 'en') {
+  const extra = LANGS[lang].datamuseExtra;
+  // Spanish vocabulary only supports similar-meaning search, not strict synonyms
+  const syn = lang === 'en'
+    ? await fetchJson(
+        'https://api.datamuse.com/words?rel_syn=' + encodeURIComponent(word) + '&max=14'
+      ) || []
+    : [];
   if (syn.length >= 4) return syn.map((x) => x.word);
-  // Not enough strict synonyms — add similar-meaning words (works for phrases)
   const similar = await fetchJson(
-    'https://api.datamuse.com/words?ml=' + encodeURIComponent(word) + '&max=14'
+    'https://api.datamuse.com/words?ml=' + encodeURIComponent(word) + '&max=14' + extra
   ) || [];
   const merged = [...syn.map((x) => x.word)];
   for (const x of similar) {
@@ -159,9 +178,9 @@ async function fetchDatamuseSynonyms(word) {
 
 // Batch-translate an array of strings to Russian in one request.
 // Strings are joined with newlines; the response preserves them.
-async function translateTexts(texts) {
+async function translateTexts(texts, from = 'en') {
   const clean = texts.map((t) => (t || '').replace(/\s+/g, ' ').trim());
-  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ru&dt=t&q=' +
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + from + '&tl=ru&dt=t&q=' +
     encodeURIComponent(clean.join('\n'));
   const data = await fetchJson(url);
   const segs = data?.[0];
@@ -171,9 +190,15 @@ async function translateTexts(texts) {
   return lines.length === clean.length ? lines : null;
 }
 
-// Attach Russian translations to the word and all its definitions
+// Attach Russian translations to the word and all its definitions.
+// The word is translated from its own language; definitions are always
+// in English (Wiktionary explains Spanish words in English too).
 async function addTranslations(entry) {
-  const texts = [entry.word];
+  const wordTr = await translateTexts([entry.word], entry.lang).catch(() => null);
+  if (wordTr?.[0] && wordTr[0].toLowerCase() !== entry.word.toLowerCase()) {
+    entry.translation = wordTr[0];
+  }
+  const texts = [];
   const refs = [];
   for (const m of entry.meanings) {
     for (const d of m.definitions) {
@@ -181,20 +206,29 @@ async function addTranslations(entry) {
       refs.push(d);
     }
   }
-  const tr = await translateTexts(texts).catch(() => null);
+  if (!texts.length) return;
+  const tr = await translateTexts(texts, 'en').catch(() => null);
   if (!tr) return;
-  if (tr[0] && tr[0].toLowerCase() !== entry.word.toLowerCase()) {
-    entry.translation = tr[0];
-  }
-  refs.forEach((d, i) => { d.definitionRu = tr[i + 1] || ''; });
+  refs.forEach((d, i) => { d.definitionRu = tr[i] || ''; });
 }
 
-async function fetchEtymology(word) {
+async function fetchEtymology(word, lang = 'en') {
   const base = 'https://en.wiktionary.org/w/api.php?format=json&origin=*&action=parse&page=' +
     encodeURIComponent(word);
   const secData = await fetchJson(base + '&prop=sections');
   const sections = secData?.parse?.sections || [];
-  const etySec = sections.find((s) => /^Etymology/.test(s.line));
+  // Wiktionary pages cover many languages — find Etymology inside ours
+  const target = LANGS[lang].wikiSection;
+  let inTarget = false;
+  let etySec = null;
+  for (const s of sections) {
+    if (s.toclevel === 1) {
+      inTarget = s.line === target;
+    } else if (inTarget && /^Etymology/.test(s.line)) {
+      etySec = s;
+      break;
+    }
+  }
   if (!etySec) return null;
 
   const txtData = await fetchJson(base + '&prop=text&section=' + etySec.index);
@@ -211,9 +245,10 @@ async function fetchEtymology(word) {
 
 /* ---------- Building the word entry ---------- */
 
-function extractEntry(word, apiData, wikiMeanings, datamuseSyns, etymology) {
+function extractEntry(word, lang, apiData, wikiMeanings, datamuseSyns, etymology) {
   const entry = {
     id: word.toLowerCase(),
+    lang,
     word,
     phonetic: '',
     audio: '',
@@ -277,11 +312,11 @@ window.onYouglishAPIReady = () => {
   if (ygPending) {
     const w = ygPending;
     ygPending = null;
-    mountYouglish(w);
+    mountYouglish(w.word, w.lang);
   }
 };
 
-function mountYouglish(word) {
+function mountYouglish(word, lang = 'en') {
   const container = document.getElementById('yg-widget');
   if (!container) return;
   container.innerHTML = '';
@@ -292,17 +327,17 @@ function mountYouglish(word) {
     width: Math.min(600, container.clientWidth || 600),
     autoStart: 0,
   });
-  ygWidget.fetch(word, 'english');
-  ygShownFor = word;
+  ygWidget.fetch(word, LANGS[lang].youglish);
+  ygShownFor = lang + ':' + word;
 }
 
-function initYouglish(word) {
-  if (ygShownFor === word && document.getElementById('yg-widget-inner')) return;
+function initYouglish(word, lang = 'en') {
+  if (ygShownFor === lang + ':' + word && document.getElementById('yg-widget-inner')) return;
   if (window.YG) {
-    mountYouglish(word);
+    mountYouglish(word, lang);
     return;
   }
-  ygPending = word;
+  ygPending = { word, lang };
   if (!ygScriptRequested) {
     ygScriptRequested = true;
     const s = document.createElement('script');
@@ -421,9 +456,9 @@ function renderStudy(entry, { saved = false } = {}) {
   const step7 = `
     <div id="yg-widget"><p class="muted">Loading videos…</p></div>
     <p class="muted" style="margin-top:10px;font-size:13.5px">
-      Real YouTube clips with “${esc(w)}”. Also try
+      Real YouTube clips with “${esc(w)}”.${entry.lang === 'en' ? ` Also try
       <a class="ext-link" style="margin:0;font-size:13.5px" href="${playphraseLink(w)}" target="_blank" rel="noopener">Playphrase.me ↗</a>
-      (movie scenes — it can’t be embedded, opens in a new tab).
+      (movie scenes — it can’t be embedded, opens in a new tab).` : ''}
     </p>`;
 
   studyArea.innerHTML = `
@@ -468,7 +503,7 @@ function bindStudyEvents(entry, saved) {
       step.classList.toggle('open');
       step.classList.add('done');
       if (step.dataset.step === '7' && step.classList.contains('open')) {
-        initYouglish(entry.word);
+        initYouglish(entry.word, entry.lang || 'en');
       }
     });
   });
@@ -476,14 +511,14 @@ function bindStudyEvents(entry, saved) {
   // Pronunciation: audio file if we have one, browser speech otherwise
   const playAudio = () => {
     if (entry.audio) {
-      new Audio(entry.audio).play().catch(() => speak(entry.word));
+      new Audio(entry.audio).play().catch(() => speak(entry.word, 0.92, entry.lang));
     } else {
-      speak(entry.word);
+      speak(entry.word, 0.92, entry.lang);
     }
   };
   $('#play-audio')?.addEventListener('click', playAudio);
   $('#play-audio-head')?.addEventListener('click', playAudio);
-  $('#play-slow')?.addEventListener('click', () => speak(entry.word, 0.55));
+  $('#play-slow')?.addEventListener('click', () => speak(entry.word, 0.55, entry.lang));
 
   // Tap a synonym to study it
   studyArea.querySelectorAll('[data-lookup]').forEach((chip) => {
@@ -497,7 +532,7 @@ function bindStudyEvents(entry, saved) {
   $('#save-btn').addEventListener('click', () => {
     entry.note = $('#note-field').value.trim();
     const words = loadWords();
-    const idx = words.findIndex((x) => x.id === entry.id);
+    const idx = words.findIndex((x) => x.id === entry.id && langOf(x) === entry.lang);
     if (idx >= 0) {
       entry.addedAt = words[idx].addedAt;
       entry.srs = words[idx].srs || newSrs();
@@ -515,7 +550,7 @@ function bindStudyEvents(entry, saved) {
   // Delete
   $('#delete-btn')?.addEventListener('click', () => {
     if (!confirm(`Remove “${entry.word}” from your dictionary?`)) return;
-    saveWords(loadWords().filter((x) => x.id !== entry.id));
+    saveWords(loadWords().filter((x) => !(x.id === entry.id && langOf(x) === entry.lang)));
     showToast('Removed');
     studyArea.hidden = true;
     studyEmpty.hidden = false;
@@ -529,6 +564,7 @@ function bindStudyEvents(entry, saved) {
 async function lookupWord(word) {
   word = word.trim();
   if (!word) return;
+  const lang = currentLang;
 
   showScreen('study');
   studyEmpty.hidden = true;
@@ -536,13 +572,14 @@ async function lookupWord(word) {
   studyArea.innerHTML = '<div class="spinner" role="status" aria-label="Loading"></div>';
 
   // If the word is already saved, keep its note and date
-  const existing = loadWords().find((x) => x.id === word.toLowerCase());
+  const existing = loadWords().find((x) => x.id === word.toLowerCase() && langOf(x) === lang);
 
   const [apiData, wikiMeanings, datamuseSyns, etymology] = await Promise.all([
-    fetchDictionary(word).catch(() => null),
-    fetchWiktionaryDefs(word).catch(() => null),
-    fetchDatamuseSynonyms(word).catch(() => null),
-    fetchEtymology(word).catch(() => null),
+    // dictionaryapi.dev is English-only; Spanish relies on Wiktionary
+    lang === 'en' ? fetchDictionary(word).catch(() => null) : Promise.resolve(null),
+    fetchWiktionaryDefs(word, lang).catch(() => null),
+    fetchDatamuseSynonyms(word, lang).catch(() => null),
+    fetchEtymology(word, lang).catch(() => null),
   ]);
 
   const gotAnything = apiData || wikiMeanings || (datamuseSyns && datamuseSyns.length) || etymology;
@@ -558,7 +595,7 @@ async function lookupWord(word) {
     return;
   }
 
-  const entry = extractEntry(word, apiData, wikiMeanings, datamuseSyns, etymology);
+  const entry = extractEntry(word, lang, apiData, wikiMeanings, datamuseSyns, etymology);
   await addTranslations(entry).catch(() => {});
   if (existing) {
     entry.note = existing.note;
@@ -572,8 +609,9 @@ async function lookupWord(word) {
 
 function renderDict(filter = '') {
   const words = loadWords().filter((x) =>
-    x.word.toLowerCase().includes(filter.toLowerCase()) ||
-    (x.note || '').toLowerCase().includes(filter.toLowerCase())
+    langOf(x) === currentLang &&
+    (x.word.toLowerCase().includes(filter.toLowerCase()) ||
+     (x.note || '').toLowerCase().includes(filter.toLowerCase()))
   );
 
   dictEmpty.hidden = words.length > 0 || filter !== '';
@@ -593,7 +631,7 @@ function renderDict(filter = '') {
 
   dictList.querySelectorAll('.dict-item').forEach((li) => {
     li.addEventListener('click', () => {
-      const entry = loadWords().find((x) => x.id === li.dataset.id);
+      const entry = loadWords().find((x) => x.id === li.dataset.id && langOf(x) === currentLang);
       if (!entry) return;
       searchInput.value = entry.word;
       showScreen('study');
@@ -676,8 +714,8 @@ function renderReviewCard() {
   const type = pickCardType(entry);
   const progress = `<p class="review-progress muted">${reviewDone + 1} / ${reviewDone + reviewQueue.length}</p>`;
   const playWord = () => {
-    if (entry.audio) new Audio(entry.audio).play().catch(() => speak(entry.word));
-    else speak(entry.word);
+    if (entry.audio) new Audio(entry.audio).play().catch(() => speak(entry.word, 0.92, langOf(entry)));
+    else speak(entry.word, 0.92, langOf(entry));
   };
   const verdictButtons = `
     <div id="review-verdict" class="review-verdict" hidden>
@@ -835,7 +873,9 @@ $('#import-file').addEventListener('change', async (e) => {
     const words = loadWords();
     let added = 0;
     for (const w of data) {
-      if (w && w.id && w.word && !words.some((x) => x.id === w.id)) {
+      if (!w || !w.id || !w.word) continue;
+      w.lang = w.lang || 'en';
+      if (!words.some((x) => x.id === w.id && langOf(x) === w.lang)) {
         words.push(w);
         added++;
       }
@@ -862,7 +902,28 @@ $('#tab-review').addEventListener('click', () => showScreen('review'));
 $('#tab-dict').addEventListener('click', () => showScreen('dict'));
 dictSearch.addEventListener('input', () => renderDict(dictSearch.value.trim()));
 
-// One-time migration: words saved before spaced repetition existed become due now
+// Language switch
+function setLang(lang) {
+  currentLang = lang;
+  localStorage.setItem(LANG_KEY, lang);
+  $('#lang-en').classList.toggle('active', lang === 'en');
+  $('#lang-es').classList.toggle('active', lang === 'es');
+  updateCounts();
+  // Reset the study card — it belongs to the previous language
+  studyArea.hidden = true;
+  studyArea.innerHTML = '';
+  studyEmpty.hidden = false;
+  searchInput.value = '';
+  const active = ['study', 'review', 'dict'].find((k) => !$('#screen-' + k).hidden);
+  if (active === 'dict') renderDict(dictSearch.value.trim());
+  if (active === 'review') startReview();
+}
+$('#lang-en').addEventListener('click', () => setLang('en'));
+$('#lang-es').addEventListener('click', () => setLang('es'));
+$('#lang-en').classList.toggle('active', currentLang === 'en');
+$('#lang-es').classList.toggle('active', currentLang === 'es');
+
+// One-time migration: add srs to pre-SRS words and lang to pre-Spanish words
 (() => {
   const words = loadWords();
   let changed = false;
@@ -871,14 +932,21 @@ dictSearch.addEventListener('input', () => renderDict(dictSearch.value.trim()));
       w.srs = { stage: 0, due: Date.now() };
       changed = true;
     }
+    if (!w.lang) {
+      w.lang = 'en';
+      changed = true;
+    }
   }
   if (changed) saveWords(words);
 })();
 
 updateCounts();
 
-// Support ?q=word links (e.g. from an iOS Shortcut)
-const initialQuery = new URLSearchParams(location.search).get('q');
+// Support ?q=word&lang=es links (e.g. from an iOS Shortcut)
+const urlParams = new URLSearchParams(location.search);
+const urlLang = urlParams.get('lang');
+if (urlLang && LANGS[urlLang]) setLang(urlLang);
+const initialQuery = urlParams.get('q');
 if (initialQuery) {
   searchInput.value = initialQuery;
   lookupWord(initialQuery);
