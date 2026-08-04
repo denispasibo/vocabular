@@ -145,6 +145,7 @@ main { max-width: 640px; margin: 0 auto; padding: 8px 16px 24px; }
 }
 .word-title { font-size: 26px; font-weight: 700; overflow-wrap: anywhere; }
 .word-phonetic { color: var(--text-soft); font-size: 16px; }
+.phonetic-ru { font-size: 15.5px; margin-top: 4px; }
 .audio-btn {
   margin-left: auto;
   background: var(--accent-tint);

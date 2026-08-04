@@ -1,7 +1,7 @@
 /* Service worker: offline app shell */
 'use strict';
 
-const CACHE = 'vocabular-v9';
+const CACHE = 'vocabular-v10';
 const SHELL = [
   '.',
   'index.html',

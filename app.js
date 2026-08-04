@@ -115,6 +115,102 @@ function speak(text, rate = 0.92, lang = 'en') {
 // Some browsers load voices asynchronously — warm them up
 if ('speechSynthesis' in window) speechSynthesis.getVoices();
 
+/* ---------- Russian practical transcription (“how to read it”) ---------- */
+
+// English IPA → Russian letters, longest symbols first
+const IPA_RU = [
+  ['dʒ', 'дж'], ['tʃ', 'ч'], ['aɪə', 'айэ'], ['aʊə', 'ауэ'], ['aɪ', 'ай'], ['aʊ', 'ау'],
+  ['eɪ', 'эй'], ['ɔɪ', 'ой'], ['oʊ', 'оу'], ['əʊ', 'оу'], ['ɪə', 'иэ'], ['eə', 'эа'],
+  ['ɛə', 'эа'], ['ʊə', 'уэ'], ['juː', 'ю'], ['ju', 'ю'], ['iː', 'и'], ['uː', 'у'],
+  ['ɑː', 'а'], ['ɔː', 'о'], ['ɜː', 'ёр'], ['ɝ', 'эр'], ['ɚ', 'эр'], ['ɜ', 'ёр'],
+  ['θ', 'т'], ['ð', 'з'], ['ʃ', 'ш'], ['ʒ', 'ж'], ['ŋ', 'нг'], ['ɹ', 'р'], ['ɾ', 'р'],
+  ['æ', 'э'], ['ʌ', 'а'], ['ɑ', 'а'], ['ɒ', 'о'], ['ɔ', 'о'], ['ʊ', 'у'], ['ɪ', 'и'],
+  ['ɛ', 'э'], ['ə', 'э'], ['ɡ', 'г'],
+  ['r', 'р'], ['j', 'й'], ['w', 'у'], ['i', 'и'], ['e', 'э'], ['u', 'у'], ['a', 'а'],
+  ['o', 'о'], ['p', 'п'], ['b', 'б'], ['t', 'т'], ['d', 'д'], ['k', 'к'], ['g', 'г'],
+  ['f', 'ф'], ['v', 'в'], ['s', 'с'], ['z', 'з'], ['h', 'х'], ['m', 'м'], ['n', 'н'],
+  ['l', 'л'],
+].sort((a, b) => b[0].length - a[0].length);
+
+function ipaEnToRu(ipa) {
+  const cleaned = (ipa || '').replace(/[/[\]()ˑʲʰ̬̥̩̯͡]/g, '');
+  // split into syllables; ˈ marks the stressed one
+  const parts = cleaned.split(/([ˈˌ.\s]+)/).filter(Boolean);
+  const sylls = [];
+  let stressNext = false;
+  for (const p of parts) {
+    if (/^[ˈˌ.\s]+$/.test(p)) {
+      stressNext = p.includes('ˈ');
+      continue;
+    }
+    let out = '';
+    let i = 0;
+    outer: while (i < p.length) {
+      for (const [k, v] of IPA_RU) {
+        if (p.startsWith(k, i)) { out += v; i += k.length; continue outer; }
+      }
+      i++; // unknown symbol — skip
+    }
+    if (out) sylls.push({ out, stressed: stressNext });
+    stressNext = false;
+  }
+  if (!sylls.length) return '';
+  return sylls
+    .map((s) => (s.stressed && sylls.length > 1 ? s.out.toUpperCase() : s.out))
+    .join(sylls.length > 1 ? '-' : '');
+}
+
+// Spanish spelling → Russian letters (reading rules are regular);
+// a written accent marks the stressed vowel in uppercase
+function esToRu(word) {
+  const w = word.toLowerCase();
+  const iot = { a: 'я', e: 'е', i: 'и', o: 'о', u: 'ю', á: 'Я', é: 'Е', í: 'И', ó: 'О', ú: 'Ю' };
+  const plain = { a: 'а', e: 'э', i: 'и', o: 'о', u: 'у', á: 'А', é: 'Э', í: 'И', ó: 'О', ú: 'У' };
+  const cons = {
+    c: 'к', d: 'д', f: 'ф', g: 'г', k: 'к', l: 'л', m: 'м', n: 'н',
+    p: 'п', r: 'р', s: 'с', t: 'т', w: 'в', ' ': ' ', '-': '-',
+  };
+  let out = '';
+  let i = 0;
+  while (i < w.length) {
+    const c = w[i];
+    const n = w[i + 1] || '';
+    const soft = 'eiéí';
+    if (c === 'c' && n === 'h') { out += 'ч'; i += 2; continue; }
+    if (c === 'l' && n === 'l') {
+      out += 'ль'; i += 2;
+      if (iot[w[i]]) { out += iot[w[i]]; i++; }
+      continue;
+    }
+    if (c === 'ñ') {
+      out += 'нь'; i++;
+      if (iot[w[i]]) { out += iot[w[i]]; i++; }
+      continue;
+    }
+    if (c === 'r' && n === 'r') { out += 'рр'; i += 2; continue; }
+    if (c === 'q' && n === 'u') { out += 'к'; i += 2; continue; }
+    if (c === 'g' && n === 'ü') { out += 'гу'; i += 2; continue; }
+    if (c === 'g' && n === 'u' && soft.includes(w[i + 2] || '')) { out += 'г'; i += 2; continue; }
+    if (c === 'g' && soft.includes(n)) { out += 'х'; i++; continue; }
+    if (c === 'c' && soft.includes(n)) { out += 'с'; i++; continue; }
+    if (c === 'h') { i++; continue; } // silent
+    if (c === 'j') { out += 'х'; i++; continue; }
+    if (c === 'y') { out += (plain[n] ? 'й' : 'и'); i++; continue; }
+    if (c === 'x') { out += 'кс'; i++; continue; }
+    if (c === 'z') { out += 'с'; i++; continue; }
+    if (c === 'v' || c === 'b') { out += 'б'; i++; continue; }
+    if (plain[c]) { out += plain[c]; i++; continue; }
+    if (cons[c] !== undefined) { out += cons[c]; i++; continue; }
+    i++;
+  }
+  return out;
+}
+
+function ruTranscription(entry) {
+  if (langOf(entry) === 'es') return esToRu(entry.word);
+  return entry.phonetic ? ipaEnToRu(entry.phonetic) : '';
+}
+
 /* ---------- API requests (with retries and fallbacks) ---------- */
 
 async function fetchJson(url, tries = 2) {
@@ -386,8 +482,10 @@ function renderStudy(entry, { saved = false } = {}) {
           : `<p class="muted">No dictionary definition found. Check the spelling, or use your note below to write the meaning down yourself.</p>`)}`;
 
   // 2. Pronunciation — always available inline (audio file or browser speech)
+  const phonRu = ruTranscription(entry);
   const step2 = `
     ${entry.phonetic ? `<p class="word-phonetic">${esc(entry.phonetic)}</p>` : ''}
+    ${phonRu ? `<p class="phonetic-ru">🗣 ${esc(phonRu)} <span class="muted" style="font-size:12.5px">(approx.)</span></p>` : ''}
     <div class="chip-row">
       <button class="btn btn-ghost" type="button" id="play-audio">🔊 Listen</button>
       <button class="btn btn-ghost" type="button" id="play-slow">🐢 Slow</button>
