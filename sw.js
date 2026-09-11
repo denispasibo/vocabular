@@ -1,12 +1,13 @@
 /* Service worker: offline app shell */
 'use strict';
 
-const CACHE = 'vocabular-v10';
+const CACHE = 'vocabular-v11';
 const SHELL = [
   '.',
   'index.html',
   'styles.css',
   'app.js',
+  'reader.js',
   'manifest.webmanifest',
   'icons/favicon.svg',
   'icons/icon-180.png',

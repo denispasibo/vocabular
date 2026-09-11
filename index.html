@@ -50,6 +50,11 @@
       </div>
     </section>
 
+    <!-- Screen: reading (books) -->
+    <section id="screen-read" class="screen" hidden>
+      <div id="read-root"></div>
+    </section>
+
     <!-- Screen: review (spaced repetition) -->
     <section id="screen-review" class="screen" hidden>
       <div id="review-area"></div>
@@ -77,6 +82,9 @@
     <button class="tab active" id="tab-study" role="tab" aria-selected="true">
       <span class="tab-icon">✏️</span> New word
     </button>
+    <button class="tab" id="tab-read" role="tab" aria-selected="false">
+      <span class="tab-icon">📖</span> Read
+    </button>
     <button class="tab" id="tab-review" role="tab" aria-selected="false">
       <span class="tab-icon">🔁</span> Review <span id="review-count" class="badge badge-alert" hidden></span>
     </button>
@@ -88,5 +96,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="app.js"></script>
+  <script src="reader.js"></script>
 </body>
 </html>

@@ -939,7 +939,7 @@ function answerReview(entry, knew) {
 /* ---------- Navigation ---------- */
 
 function showScreen(name) {
-  for (const key of ['study', 'review', 'dict']) {
+  for (const key of ['study', 'read', 'review', 'dict']) {
     $('#screen-' + key).hidden = key !== name;
     const tab = $('#tab-' + key);
     tab.classList.toggle('active', key === name);
@@ -947,6 +947,7 @@ function showScreen(name) {
   }
   if (name === 'dict') renderDict(dictSearch.value.trim());
   if (name === 'review') startReview();
+  if (name === 'read' && typeof renderRead === 'function') renderRead();
 }
 
 /* ---------- Export / import ---------- */
@@ -996,6 +997,7 @@ searchForm.addEventListener('submit', (e) => {
 });
 
 $('#tab-study').addEventListener('click', () => showScreen('study'));
+$('#tab-read').addEventListener('click', () => showScreen('read'));
 $('#tab-review').addEventListener('click', () => showScreen('review'));
 $('#tab-dict').addEventListener('click', () => showScreen('dict'));
 dictSearch.addEventListener('input', () => renderDict(dictSearch.value.trim()));
