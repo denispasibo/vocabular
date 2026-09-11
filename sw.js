@@ -1,7 +1,7 @@
 /* Service worker: offline app shell */
 'use strict';
 
-const CACHE = 'vocabular-v11';
+const CACHE = 'vocabular-v12';
 const SHELL = [
   '.',
   'index.html',
@@ -31,17 +31,18 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Cache only our own static files; API requests always go to the network
+  // Only our own static files; API requests always go straight to the network
   if (url.origin !== location.origin) return;
 
+  // Network-first: users always get the latest version right away;
+  // the cache serves as the offline fallback
   e.respondWith(
-    caches.match(e.request).then((cached) =>
-      cached ||
-      fetch(e.request).then((res) => {
+    fetch(e.request)
+      .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy));
         return res;
       })
-    )
+      .catch(() => caches.match(e.request))
   );
 });

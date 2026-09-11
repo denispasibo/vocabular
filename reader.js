@@ -91,10 +91,13 @@ function textToChapters(raw) {
   return chapters.filter((c) => c.paras.length);
 }
 
-async function parseEpub(file) {
+async function parseEpub(file, onProgress) {
+  onProgress?.('Unpacking EPUB…');
   await loadScript(JSZIP_URL);
   const zip = await JSZip.loadAsync(file);
-  const containerXml = await zip.file('META-INF/container.xml').async('string');
+  const containerFile = zip.file('META-INF/container.xml');
+  if (!containerFile) throw new Error('Not a valid EPUB (no container.xml inside)');
+  const containerXml = await containerFile.async('string');
   const container = new DOMParser().parseFromString(containerXml, 'application/xml');
   const opfPath = container.getElementsByTagName('rootfile')[0].getAttribute('full-path');
   const opfDir = opfPath.split('/').slice(0, -1).join('/');
@@ -108,8 +111,10 @@ async function parseEpub(file) {
     file.name.replace(/\.epub$/i, '');
 
   const chapters = [];
-  for (const itemref of opf.getElementsByTagName('itemref')) {
-    const href = manifest[itemref.getAttribute('idref')];
+  const itemrefs = [...opf.getElementsByTagName('itemref')];
+  for (let i = 0; i < itemrefs.length; i++) {
+    onProgress?.(`Reading chapter ${i + 1} / ${itemrefs.length}…`);
+    const href = manifest[itemrefs[i].getAttribute('idref')];
     if (!href) continue;
     const path = decodeURIComponent((opfDir ? opfDir + '/' : '') + href.split('#')[0]);
     const entry = zip.file(path);
@@ -122,17 +127,41 @@ async function parseEpub(file) {
     if (!paras.length) continue;
     chapters.push({ title: heading || `Chapter ${chapters.length + 1}`, paras });
   }
-  if (!chapters.length) throw new Error('No readable text found in this EPUB');
+  if (!chapters.length) {
+    if (zip.file('META-INF/encryption.xml')) {
+      throw new Error('This EPUB is DRM-protected (encrypted) — the text can’t be read. Use a DRM-free copy.');
+    }
+    throw new Error('No readable text found in this EPUB');
+  }
   return { title, chapters };
 }
 
-async function parsePdf(file) {
+let pdfWorkerReady = false;
+
+async function ensurePdfjs() {
   await loadScript(PDFJS_URL);
-  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+  if (!pdfWorkerReady) {
+    // A cross-origin worker URL can't be used directly — load the worker
+    // code through a same-origin blob so parsing runs off the main thread
+    try {
+      const src = await (await fetch(PDFJS_WORKER_URL)).text();
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    } catch {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+    }
+    pdfWorkerReady = true;
+  }
+}
+
+async function parsePdf(file, onProgress) {
+  onProgress?.('Loading PDF engine…');
+  await ensurePdfjs();
   const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
 
   const pages = [];
   for (let p = 1; p <= pdf.numPages; p++) {
+    if (p === 1 || p % 5 === 0) onProgress?.(`Reading page ${p} / ${pdf.numPages}…`);
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
     let text = '';
@@ -169,12 +198,13 @@ async function parsePdf(file) {
   return { title: file.name.replace(/\.pdf$/i, ''), chapters: chs };
 }
 
-async function importBookFile(file) {
+async function importBookFile(file, onProgress) {
   const name = file.name.toLowerCase();
   let parsed;
-  if (name.endsWith('.epub')) parsed = await parseEpub(file);
-  else if (name.endsWith('.pdf')) parsed = await parsePdf(file);
+  if (name.endsWith('.epub')) parsed = await parseEpub(file, onProgress);
+  else if (name.endsWith('.pdf')) parsed = await parsePdf(file, onProgress);
   else parsed = { title: file.name.replace(/\.[^.]+$/, ''), chapters: textToChapters(await file.text()) };
+  onProgress?.('Saving…');
   return addBook(parsed.title, parsed.chapters);
 }
 
@@ -193,7 +223,12 @@ async function addBook(title, chapters) {
 
 /* ---------- Library screen ---------- */
 
-async function renderRead() {
+function showImportStatus(msg) {
+  const el = document.getElementById('import-status');
+  if (el) el.textContent = msg;
+}
+
+async function renderRead(errorMsg = '') {
   if (currentBook) {
     renderReader();
     return;
@@ -203,6 +238,7 @@ async function renderRead() {
   const hasKey = !!localStorage.getItem(API_KEY_STORE);
 
   readRoot.innerHTML = `
+    ${errorMsg ? `<div class="import-error">⚠️ ${esc(errorMsg)}</div>` : ''}
     <div class="lib-toolbar">
       <button class="btn btn-primary" id="add-book-btn">📂 Add book</button>
       <button class="btn btn-ghost" id="paste-text-btn">📋 Paste text</button>
@@ -246,14 +282,18 @@ async function renderRead() {
   fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    showToast('Importing…');
+    readRoot.innerHTML = `<div class="empty-state">
+      <div class="spinner" role="status"></div>
+      <p><strong>${esc(file.name)}</strong></p>
+      <p id="import-status" class="muted">Importing…</p>
+    </div>`;
     try {
-      const book = await importBookFile(file);
+      const book = await importBookFile(file, showImportStatus);
       showToast(`Added: ${book.title}`);
       openBook(book.id);
     } catch (err) {
-      showToast(err.message || 'Could not import this file');
-      renderRead();
+      console.error('Book import failed:', err);
+      renderRead(err.message || 'Could not import this file');
     }
     e.target.value = '';
   });
