@@ -305,7 +305,7 @@ async function importBookFile(file, onProgress) {
   return addBook(parsed.title, parsed.chapters);
 }
 
-async function addBook(title, chapters, scan = null) {
+async function addBook(title, chapters, scan = null, extra = {}) {
   if (!chapters.length) throw new Error('Empty book');
   const book = {
     id: Date.now().toString(36),
@@ -313,6 +313,7 @@ async function addBook(title, chapters, scan = null) {
     lang: currentLang,
     addedAt: Date.now(),
     chapters,
+    ...extra,
   };
   if (scan) {
     try {
@@ -328,6 +329,44 @@ async function addBook(title, chapters, scan = null) {
   }
   await dbPutBook(book);
   return book;
+}
+
+/* ---------- Songs (lyrics from LRCLIB) ---------- */
+
+async function searchSongs(query) {
+  const res = await fetch('https://lrclib.net/api/search?q=' + encodeURIComponent(query));
+  if (!res.ok) throw new Error('Lyrics search failed (' + res.status + ')');
+  const data = await res.json();
+  const seen = new Set();
+  const out = [];
+  for (const x of data) {
+    if (!x.plainLyrics) continue; // instrumental or empty
+    const key = (x.artistName + '|' + x.trackName).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(x);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+async function importSong(item) {
+  const rawLines = item.plainLyrics.split('\n').map((l) => l.replace(/\s+/g, ' ').trim());
+  // keep single blank lines as stanza separators
+  const lines = [];
+  for (const l of rawLines) {
+    if (l === '' && (lines.length === 0 || lines[lines.length - 1] === '')) continue;
+    lines.push(l);
+  }
+  while (lines[lines.length - 1] === '') lines.pop();
+  if (!lines.filter(Boolean).length) throw new Error('This entry has no usable lyrics');
+
+  const title = `${item.artistName} — ${item.trackName}`;
+  return addBook(title, [{ title: 'Lyrics', paras: lines }], null, {
+    kind: 'song',
+    artist: item.artistName,
+    track: item.trackName,
+  });
 }
 
 /* ---------- Library screen ---------- */
@@ -359,9 +398,18 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
     </div>` : ''}
     <div class="lib-toolbar">
       <button class="btn btn-primary" id="add-book-btn">📂 Add book</button>
+      <button class="btn btn-ghost" id="add-song-btn">🎵 Add song</button>
       <button class="btn btn-ghost" id="paste-text-btn">📋 Paste text</button>
       <button class="btn btn-ghost" id="ai-settings-btn" title="AI settings">${hasKey ? '🤖 AI ✓' : '🤖 AI'}</button>
       <input type="file" id="book-file" accept=".epub,.pdf,.txt" hidden>
+    </div>
+    <div id="song-form" class="ai-settings" hidden>
+      <form id="song-search-form" class="typing-row" style="margin-top:0">
+        <input type="text" id="song-query" class="paste-input" style="flex:1;min-width:0"
+               placeholder="Artist and song title…" autocomplete="off">
+        <button class="btn btn-primary" type="submit">Search</button>
+      </form>
+      <div id="song-results" style="margin-top:10px"></div>
     </div>
     <div id="ai-settings" class="ai-settings" hidden>
       <p style="font-size:14px;margin-bottom:8px">Claude API key enables the full “Why is it said this way?”
@@ -384,8 +432,8 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
         const pct = Math.round(((pos.ch + pos.ratio) / b.chapters.length) * 100);
         return `<li class="dict-item" data-id="${b.id}">
           <div class="dict-item-main">
-            <div class="dict-item-word">${b.lang === 'es' ? '🇪🇸' : '🇬🇧'} ${esc(b.title)}</div>
-            <div class="dict-item-sub">${b.chapters.length} ${b.chapters.length === 1 ? 'chapter' : 'chapters'} · ${pct}% read</div>
+            <div class="dict-item-word">${b.kind === 'song' ? '🎵' : (b.lang === 'es' ? '🇪🇸' : '🇬🇧')} ${esc(b.title)}</div>
+            <div class="dict-item-sub">${b.kind === 'song' ? 'song lyrics' : `${b.chapters.length} ${b.chapters.length === 1 ? 'chapter' : 'chapters'} · ${pct}% read`}</div>
           </div>
           <button class="book-del" data-del="${b.id}" aria-label="Delete book">✕</button>
         </li>`;
@@ -447,6 +495,52 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
     const f = document.getElementById('paste-form');
     f.hidden = !f.hidden;
     document.getElementById('ai-settings').hidden = true;
+    document.getElementById('song-form').hidden = true;
+  });
+
+  // Songs
+  document.getElementById('add-song-btn').addEventListener('click', () => {
+    const f = document.getElementById('song-form');
+    f.hidden = !f.hidden;
+    document.getElementById('ai-settings').hidden = true;
+    document.getElementById('paste-form').hidden = true;
+    if (!f.hidden) document.getElementById('song-query').focus();
+  });
+  document.getElementById('song-search-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = document.getElementById('song-query').value.trim();
+    if (!q) return;
+    const box = document.getElementById('song-results');
+    box.innerHTML = '<div class="spinner" role="status"></div>';
+    try {
+      const results = await searchSongs(q);
+      if (!results.length) {
+        box.innerHTML = '<p class="muted">Nothing found — try “artist song title”.</p>';
+        return;
+      }
+      box.innerHTML = results.map((r, i) => {
+        const dur = r.duration ? `${Math.floor(r.duration / 60)}:${String(Math.round(r.duration % 60)).padStart(2, '0')}` : '';
+        return `<div class="dict-item song-result" data-i="${i}" style="margin-bottom:8px">
+          <div class="dict-item-main">
+            <div class="dict-item-word">${esc(r.trackName)}</div>
+            <div class="dict-item-sub">${esc(r.artistName)}${dur ? ' · ' + dur : ''}</div>
+          </div>
+        </div>`;
+      }).join('');
+      box.querySelectorAll('.song-result').forEach((el) => {
+        el.addEventListener('click', async () => {
+          try {
+            const book = await importSong(results[+el.dataset.i]);
+            showToast('Song added ✓');
+            openBook(book.id);
+          } catch (err) {
+            showToast(err.message || 'Could not import lyrics');
+          }
+        });
+      });
+    } catch (err) {
+      box.innerHTML = `<p class="result-bad">${esc(err.message || 'Search failed')}</p>`;
+    }
   });
   document.getElementById('paste-add').addEventListener('click', async () => {
     const title = document.getElementById('paste-title').value.trim() || 'Pasted text';
@@ -531,9 +625,15 @@ function renderReader(restoreRatio = 0) {
       <button class="btn btn-ghost btn-small" id="fs-minus" aria-label="Smaller text">A−</button>
       <button class="btn btn-ghost btn-small" id="fs-plus" aria-label="Larger text">A+</button>
     </div>
-    <div class="reader-hint muted">Tap any word to translate it. Select a phrase to analyze it.</div>
-    <div id="reader-text" class="reader-text" style="font-size:${fs}px">
-      ${ch.paras.map((p) => `<p>${esc(p)}</p>`).join('')}
+    <div class="reader-hint muted">Tap any word to translate it. Select a phrase to analyze it.${
+      book.kind === 'song'
+        ? ` <a class="ext-link" style="margin:0;font-size:12.5px" target="_blank" rel="noopener"
+             href="https://www.youtube.com/results?search_query=${encodeURIComponent(book.artist + ' ' + book.track)}">▶️ YouTube</a>`
+        : ''}</div>
+    <div id="reader-text" class="reader-text${book.kind === 'song' ? ' song-text' : ''}" style="font-size:${fs}px">
+      ${ch.paras.map((p) => p === ''
+        ? '<div class="stanza-gap"></div>'
+        : `<p>${esc(p)}</p>`).join('')}
     </div>
     <div class="reader-nav">
       <button class="btn btn-ghost" id="ch-prev" ${currentChapter === 0 ? 'disabled' : ''}>‹ Prev</button>

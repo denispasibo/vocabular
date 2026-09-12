@@ -334,6 +334,8 @@ main { max-width: 640px; margin: 0 auto; padding: 8px 16px 24px; }
 .reader-text p { margin-bottom: 1em; }
 .reader-text p:last-child { margin-bottom: 0; }
 .reader-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 14px; }
+.song-text p { margin-bottom: 0.3em; }
+.song-text .stanza-gap { height: 1.3em; }
 
 .scan-wrap {
   position: relative;
