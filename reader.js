@@ -8,6 +8,9 @@ const EXPLAIN_MODEL = 'claude-haiku-4-5';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const PDFJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
 const PDFJS_WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const TESSERACT_URL = 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js';
+
+let pendingOcrFile = null; // scanned PDF waiting for the user to start OCR
 
 const readRoot = document.getElementById('read-root');
 let currentBook = null;
@@ -172,8 +175,18 @@ async function parsePdf(file, onProgress) {
     pages.push(text);
   }
 
-  // Reassemble paragraphs: unhyphenate, then break where a line ends a
-  // sentence and the next starts with a capital letter or quote
+  const chs = pagesToChapters(pages);
+  if (!chs.length) {
+    const err = new Error('No text layer found in this PDF (scanned image?)');
+    err.code = 'NO_TEXT_LAYER';
+    throw err;
+  }
+  return { title: file.name.replace(/\.pdf$/i, ''), chapters: chs };
+}
+
+// Reassemble page texts into paragraphs: unhyphenate, then break where a
+// line ends a sentence
+function pagesToChapters(pages) {
   const PAGES_PER_CH = 10;
   const chapters = [];
   for (let i = 0; i < pages.length; i += PAGES_PER_CH) {
@@ -193,9 +206,53 @@ async function parsePdf(file, onProgress) {
     const last = Math.min(i + PAGES_PER_CH, pages.length);
     chapters.push({ title: `Pages ${i + 1}–${last}`, paras: paras.filter((s) => s.length > 2) });
   }
-  const chs = chapters.filter((c) => c.paras.length);
-  if (!chs.length) throw new Error('No text layer found in this PDF (scanned image?)');
-  return { title: file.name.replace(/\.pdf$/i, ''), chapters: chs };
+  return chapters.filter((c) => c.paras.length);
+}
+
+/* ---------- OCR for scanned PDFs (runs fully in the browser) ---------- */
+
+async function ocrPdf(file, onProgress) {
+  onProgress?.('Loading OCR engine…');
+  await ensurePdfjs();
+  await loadScript(TESSERACT_URL);
+
+  let ocrPage = 0;
+  let ocrTotal = 0;
+  const langCode = currentLang === 'es' ? 'spa' : 'eng';
+  const worker = await Tesseract.createWorker(langCode, 1, {
+    logger: (m) => {
+      if (m.status === 'recognizing text' && ocrTotal) {
+        onProgress?.(`Recognizing page ${ocrPage} / ${ocrTotal} — ${Math.round((m.progress || 0) * 100)}%`);
+      }
+    },
+  });
+
+  try {
+    const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+    ocrTotal = pdf.numPages;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const pages = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      ocrPage = p;
+      onProgress?.(`Rendering page ${p} / ${pdf.numPages}…`);
+      const page = await pdf.getPage(p);
+      let viewport = page.getViewport({ scale: 2 });
+      if (viewport.width > 1800) {
+        viewport = page.getViewport({ scale: (2 * 1800) / viewport.width });
+      }
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const { data } = await worker.recognize(canvas);
+      pages.push(data.text || '');
+    }
+    const chapters = pagesToChapters(pages);
+    if (!chapters.length) throw new Error('OCR finished but found no readable text');
+    return { title: file.name.replace(/\.pdf$/i, ''), chapters };
+  } finally {
+    worker.terminate();
+  }
 }
 
 async function importBookFile(file, onProgress) {
@@ -228,7 +285,7 @@ function showImportStatus(msg) {
   if (el) el.textContent = msg;
 }
 
-async function renderRead(errorMsg = '') {
+async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
   if (currentBook) {
     renderReader();
     return;
@@ -238,7 +295,12 @@ async function renderRead(errorMsg = '') {
   const hasKey = !!localStorage.getItem(API_KEY_STORE);
 
   readRoot.innerHTML = `
-    ${errorMsg ? `<div class="import-error">⚠️ ${esc(errorMsg)}</div>` : ''}
+    ${errorMsg ? `<div class="import-error">⚠️ ${esc(errorMsg)}
+      ${offerOcr ? `<p style="margin-top:8px;color:var(--text)">This looks like a scanned book.
+        I can recognize the text right here in the app — roughly 3–10 seconds per page,
+        done once and saved.</p>
+        <button class="btn btn-primary btn-block" id="ocr-btn">🔍 Recognize text (OCR)</button>` : ''}
+    </div>` : ''}
     <div class="lib-toolbar">
       <button class="btn btn-primary" id="add-book-btn">📂 Add book</button>
       <button class="btn btn-ghost" id="paste-text-btn">📋 Paste text</button>
@@ -293,9 +355,35 @@ async function renderRead(errorMsg = '') {
       openBook(book.id);
     } catch (err) {
       console.error('Book import failed:', err);
-      renderRead(err.message || 'Could not import this file');
+      if (err.code === 'NO_TEXT_LAYER') {
+        pendingOcrFile = file;
+        renderRead(err.message, { offerOcr: true });
+      } else {
+        renderRead(err.message || 'Could not import this file');
+      }
     }
     e.target.value = '';
+  });
+
+  document.getElementById('ocr-btn')?.addEventListener('click', async () => {
+    const file = pendingOcrFile;
+    if (!file) { renderRead(); return; }
+    readRoot.innerHTML = `<div class="empty-state">
+      <div class="spinner" role="status"></div>
+      <p><strong>${esc(file.name)}</strong></p>
+      <p id="import-status" class="muted">Starting OCR…</p>
+      <p class="muted" style="font-size:12.5px;margin-top:10px">Keep this tab open — recognition runs on your device.</p>
+    </div>`;
+    try {
+      const parsed = await ocrPdf(file, showImportStatus);
+      const book = await addBook(parsed.title, parsed.chapters);
+      pendingOcrFile = null;
+      showToast('Text recognized ✓');
+      openBook(book.id);
+    } catch (err) {
+      console.error('OCR failed:', err);
+      renderRead(err.message || 'OCR failed');
+    }
   });
 
   document.getElementById('paste-text-btn').addEventListener('click', () => {
