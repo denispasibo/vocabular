@@ -21,26 +21,42 @@ let popupWordCtx = null; // { word, sentence } for the sentence sheet
 
 function booksDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('vocabular-books', 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('books', { keyPath: 'id' });
+    const req = indexedDB.open('vocabular-books', 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('books')) db.createObjectStore('books', { keyPath: 'id' });
+      // scanned page images, keyed "bookId:pageIndex"
+      if (!db.objectStoreNames.contains('pages')) db.createObjectStore('pages');
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-function booksTx(mode, fn) {
+function storeTx(store, mode, fn) {
   return booksDb().then((db) => new Promise((resolve, reject) => {
-    const tx = db.transaction('books', mode);
-    const out = fn(tx.objectStore('books'));
+    const tx = db.transaction(store, mode);
+    const out = fn(tx.objectStore(store));
     tx.oncomplete = () => resolve(out.result !== undefined ? out.result : undefined);
     tx.onerror = () => reject(tx.error);
   }));
 }
 
+const booksTx = (mode, fn) => storeTx('books', mode, fn);
 const dbAllBooks = () => booksTx('readonly', (s) => s.getAll());
 const dbGetBook = (id) => booksTx('readonly', (s) => s.get(id));
 const dbPutBook = (book) => booksTx('readwrite', (s) => s.put(book));
 const dbDeleteBook = (id) => booksTx('readwrite', (s) => s.delete(id));
+
+const dbPutPage = (bookId, idx, blob) =>
+  storeTx('pages', 'readwrite', (s) => s.put(blob, bookId + ':' + idx));
+const dbGetPage = (bookId, idx) =>
+  storeTx('pages', 'readonly', (s) => s.get(bookId + ':' + idx));
+async function dbDeletePages(bookId, count) {
+  for (let i = 0; i < count; i++) {
+    await storeTx('pages', 'readwrite', (s) => s.delete(bookId + ':' + i)).catch(() => {});
+  }
+}
 
 const posKey = (id) => 'vocabular.bookpos.' + id;
 
@@ -233,6 +249,8 @@ async function ocrPdf(file, onProgress) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const pages = [];
+    const scanPages = []; // per-page word boxes for the original-layout view
+    const pageBlobs = [];
     for (let p = 1; p <= pdf.numPages; p++) {
       ocrPage = p;
       onProgress?.(`Rendering page ${p} / ${pdf.numPages}…`);
@@ -246,10 +264,32 @@ async function ocrPdf(file, onProgress) {
       await page.render({ canvasContext: ctx, viewport }).promise;
       const { data } = await worker.recognize(canvas);
       pages.push(data.text || '');
+
+      // Words with boxes + a joined text where each word knows its offset,
+      // so a tap in Book view can reconstruct the surrounding sentence
+      const words = [];
+      let joined = '';
+      for (const w of data.words || []) {
+        const t = (w.text || '').trim();
+        if (!t) continue;
+        const off = joined ? joined.length + 1 : 0;
+        words.push({
+          t,
+          i: off,
+          x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1,
+        });
+        joined += (joined ? ' ' : '') + t;
+      }
+      scanPages.push({ w: canvas.width, h: canvas.height, text: joined, words });
+      pageBlobs.push(await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.8)));
     }
     const chapters = pagesToChapters(pages);
     if (!chapters.length) throw new Error('OCR finished but found no readable text');
-    return { title: file.name.replace(/\.pdf$/i, ''), chapters };
+    return {
+      title: file.name.replace(/\.pdf$/i, ''),
+      chapters,
+      scan: { pages: scanPages, blobs: pageBlobs },
+    };
   } finally {
     worker.terminate();
   }
@@ -265,7 +305,7 @@ async function importBookFile(file, onProgress) {
   return addBook(parsed.title, parsed.chapters);
 }
 
-async function addBook(title, chapters) {
+async function addBook(title, chapters, scan = null) {
   if (!chapters.length) throw new Error('Empty book');
   const book = {
     id: Date.now().toString(36),
@@ -274,6 +314,18 @@ async function addBook(title, chapters) {
     addedAt: Date.now(),
     chapters,
   };
+  if (scan) {
+    try {
+      for (let i = 0; i < scan.blobs.length; i++) {
+        await dbPutPage(book.id, i, scan.blobs[i]);
+      }
+      book.scan = { pages: scan.pages };
+    } catch (e) {
+      // Not enough storage for page images — keep the text-only book
+      console.error('Failed to store page images:', e);
+      await dbDeletePages(book.id, scan.blobs.length);
+    }
+  }
   await dbPutBook(book);
   return book;
 }
@@ -287,7 +339,11 @@ function showImportStatus(msg) {
 
 async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
   if (currentBook) {
-    renderReader();
+    if (currentBook.scan && localStorage.getItem('vocabular.scanview.' + currentBook.id) === '1') {
+      renderBookView(+localStorage.getItem('vocabular.scanpos.' + currentBook.id) || 0);
+    } else {
+      renderReader();
+    }
     return;
   }
   const books = await dbAllBooks().catch(() => []);
@@ -376,7 +432,8 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
     </div>`;
     try {
       const parsed = await ocrPdf(file, showImportStatus);
-      const book = await addBook(parsed.title, parsed.chapters);
+      showImportStatus('Saving pages…');
+      const book = await addBook(parsed.title, parsed.chapters, parsed.scan);
       pendingOcrFile = null;
       showToast('Text recognized ✓');
       openBook(book.id);
@@ -430,7 +487,9 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
       const book = await dbGetBook(id);
       if (!confirm(`Delete “${book?.title}” from the library?`)) return;
       await dbDeleteBook(id);
+      if (book?.scan) await dbDeletePages(id, book.scan.pages.length);
       localStorage.removeItem(posKey(id));
+      localStorage.removeItem('vocabular.scanpos.' + id);
       renderRead();
     });
   });
@@ -442,7 +501,11 @@ async function openBook(id) {
   currentBook = await dbGetBook(id);
   if (!currentBook) { renderRead(); return; }
   currentChapter = Math.min(loadPos(id).ch, currentBook.chapters.length - 1);
-  renderReader(loadPos(id).ratio);
+  if (currentBook.scan && localStorage.getItem('vocabular.scanview.' + id) === '1') {
+    renderBookView(+localStorage.getItem('vocabular.scanpos.' + id) || 0);
+  } else {
+    renderReader(loadPos(id).ratio);
+  }
 }
 
 function readerFontSize() {
@@ -454,9 +517,12 @@ function renderReader(restoreRatio = 0) {
   const ch = book.chapters[currentChapter];
   const fs = readerFontSize();
 
+  localStorage.setItem('vocabular.scanview.' + book.id, '0');
+
   readRoot.innerHTML = `
     <div class="reader-bar">
       <button class="btn btn-ghost btn-small" id="reader-back">‹ Library</button>
+      ${book.scan ? `<button class="btn btn-ghost btn-small" id="view-book" title="Original pages">📄 Book</button>` : ''}
       <select id="chapter-select" class="chapter-select" aria-label="Chapter">
         ${book.chapters.map((c, i) =>
           `<option value="${i}" ${i === currentChapter ? 'selected' : ''}>${esc(c.title.slice(0, 48))}</option>`
@@ -481,6 +547,9 @@ function renderReader(restoreRatio = 0) {
     hideWordPop();
     hideSheet();
     renderRead();
+  });
+  document.getElementById('view-book')?.addEventListener('click', () => {
+    renderBookView(+localStorage.getItem('vocabular.scanpos.' + book.id) || 0);
   });
   document.getElementById('chapter-select').addEventListener('change', (e) => {
     currentChapter = +e.target.value;
@@ -521,6 +590,69 @@ function renderReader(restoreRatio = 0) {
       savePos(book.id, currentChapter, max > 0 ? window.scrollY / max : 0);
     }, 400);
   };
+}
+
+/* ---------- Book view: original scanned pages with tappable words ---------- */
+
+let scanImgUrl = null;
+
+async function renderBookView(pageIdx = 0) {
+  const book = currentBook;
+  if (!book?.scan) { renderReader(); return; }
+  const total = book.scan.pages.length;
+  pageIdx = Math.max(0, Math.min(pageIdx, total - 1));
+  localStorage.setItem('vocabular.scanview.' + book.id, '1');
+  localStorage.setItem('vocabular.scanpos.' + book.id, pageIdx);
+  hideWordPop();
+  hideSheet();
+  if (scanImgUrl) { URL.revokeObjectURL(scanImgUrl); scanImgUrl = null; }
+
+  const pg = book.scan.pages[pageIdx];
+  const blob = await dbGetPage(book.id, pageIdx).catch(() => null);
+
+  readRoot.innerHTML = `
+    <div class="reader-bar">
+      <button class="btn btn-ghost btn-small" id="reader-back">‹ Library</button>
+      <button class="btn btn-ghost btn-small" id="view-text" title="Text view">📖 Text</button>
+      <span class="muted" style="flex:1;text-align:center;font-size:13.5px">${pageIdx + 1} / ${total}</span>
+      <button class="btn btn-ghost btn-small" id="pg-prev" ${pageIdx === 0 ? 'disabled' : ''}>‹</button>
+      <button class="btn btn-ghost btn-small" id="pg-next" ${pageIdx >= total - 1 ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="reader-hint muted">Original page — tap any word to translate it.</div>
+    <div class="scan-wrap">
+      ${blob ? `<img id="scan-img" alt="Book page ${pageIdx + 1}">` : '<p class="muted" style="padding:30px;text-align:center">Page image not available on this device</p>'}
+      <div class="scan-overlay" id="scan-overlay"></div>
+    </div>`;
+
+  document.getElementById('reader-back').addEventListener('click', () => {
+    currentBook = null;
+    hideWordPop();
+    hideSheet();
+    renderRead();
+  });
+  document.getElementById('view-text').addEventListener('click', () => renderReader());
+  document.getElementById('pg-prev').addEventListener('click', () => renderBookView(pageIdx - 1));
+  document.getElementById('pg-next').addEventListener('click', () => renderBookView(pageIdx + 1));
+
+  if (blob) {
+    scanImgUrl = URL.createObjectURL(blob);
+    document.getElementById('scan-img').src = scanImgUrl;
+  }
+
+  // Invisible word hotspots, positioned in percent of the page size
+  const overlay = document.getElementById('scan-overlay');
+  overlay.innerHTML = pg.words.map((w, k) =>
+    `<span data-k="${k}" style="left:${((w.x0 / pg.w) * 100).toFixed(2)}%;top:${((w.y0 / pg.h) * 100).toFixed(2)}%;width:${(((w.x1 - w.x0) / pg.w) * 100).toFixed(2)}%;height:${(((w.y1 - w.y0) / pg.h) * 100).toFixed(2)}%"></span>`
+  ).join('');
+  overlay.addEventListener('click', (e) => {
+    const span = e.target.closest('span[data-k]');
+    if (!span) { hideWordPop(); return; }
+    const w = pg.words[+span.dataset.k];
+    const word = w.t.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+    if (!word) return;
+    showWordPop({ word, paraText: pg.text, wordStart: w.i }, e.clientX, e.clientY);
+  });
+  window.scrollTo(0, 0);
 }
 
 /* ---------- Tap handling: word popup ---------- */

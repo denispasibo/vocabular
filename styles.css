@@ -335,6 +335,18 @@ main { max-width: 640px; margin: 0 auto; padding: 8px 16px 24px; }
 .reader-text p:last-child { margin-bottom: 0; }
 .reader-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 14px; }
 
+.scan-wrap {
+  position: relative;
+  background: #fff;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.scan-wrap img { width: 100%; display: block; }
+.scan-overlay { position: absolute; inset: 0; }
+.scan-overlay span { position: absolute; cursor: pointer; border-radius: 3px; }
+.scan-overlay span:active { background: rgba(79, 70, 229, 0.2); }
+
 .word-pop {
   position: fixed;
   z-index: 40;
