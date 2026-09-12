@@ -213,10 +213,12 @@ function ruTranscription(entry) {
 
 /* ---------- API requests (with retries and fallbacks) ---------- */
 
-async function fetchJson(url, tries = 2) {
+// Every request gets a timeout — a hanging API must never freeze the app
+async function fetchJson(url, tries = 2, timeoutMs = 6000) {
   for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetch(url);
+      const opts = AbortSignal?.timeout ? { signal: AbortSignal.timeout(timeoutMs) } : {};
+      const res = await fetch(url, opts);
       if (res.ok) return await res.json();
     } catch { /* retry */ }
   }
@@ -224,8 +226,9 @@ async function fetchJson(url, tries = 2) {
 }
 
 async function fetchDictionary(word) {
+  // this API hangs regularly — one short attempt, Wiktionary covers the rest
   const data = await fetchJson(
-    'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word)
+    'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word), 1, 5000
   );
   return Array.isArray(data) && data.length ? data : null;
 }

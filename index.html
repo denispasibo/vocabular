@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Vocabular</title>
   <meta name="description" content="Learn English words with a checklist: meaning, pronunciation, examples, synonyms, etymology and Playphrase.">
-  <meta name="theme-color" content="#4F46E5">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F2F2F7">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -16,12 +17,14 @@
 </head>
 <body>
   <header class="app-header">
-    <h1>Vocabular</h1>
-    <p class="tagline">word → checklist → dictionary</p>
-    <div class="lang-switch" role="group" aria-label="Language">
-      <button type="button" id="lang-en" class="lang-btn">🇬🇧 EN</button>
-      <button type="button" id="lang-es" class="lang-btn">🇪🇸 ES</button>
+    <div class="header-row">
+      <h1>Vocabular</h1>
+      <div class="lang-switch" role="group" aria-label="Language">
+        <button type="button" id="lang-en" class="lang-btn">🇬🇧 EN</button>
+        <button type="button" id="lang-es" class="lang-btn">🇪🇸 ES</button>
+      </div>
     </div>
+    <p class="tagline">word → checklist → dictionary</p>
   </header>
 
   <main id="main">

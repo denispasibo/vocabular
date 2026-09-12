@@ -334,7 +334,8 @@ async function addBook(title, chapters, scan = null, extra = {}) {
 /* ---------- Songs (lyrics from LRCLIB) ---------- */
 
 async function searchSongs(query) {
-  const res = await fetch('https://lrclib.net/api/search?q=' + encodeURIComponent(query));
+  const opts = AbortSignal?.timeout ? { signal: AbortSignal.timeout(10000) } : {};
+  const res = await fetch('https://lrclib.net/api/search?q=' + encodeURIComponent(query), opts);
   if (!res.ok) throw new Error('Lyrics search failed (' + res.status + ')');
   const data = await res.json();
   const seen = new Set();
