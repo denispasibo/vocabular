@@ -752,6 +752,7 @@ async function renderBookView(pageIdx = 0) {
     const word = w.t.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
     if (!word) return;
     showWordPop({ word, paraText: pg.text, wordStart: w.i }, e.clientX, e.clientY);
+    e.stopPropagation();
   });
   window.scrollTo(0, 0);
 }
@@ -800,11 +801,13 @@ function onReaderTap(e) {
     // A selected phrase — straight to the sentence sheet
     hideWordPop();
     openSheet(sel.replace(/\s+/g, ' ').slice(0, 400), null);
+    e.stopPropagation();
     return;
   }
   const hit = wordAtPoint(e.clientX, e.clientY);
   if (!hit) { hideWordPop(); return; }
   showWordPop(hit, e.clientX, e.clientY);
+  e.stopPropagation();
 }
 
 let wordPopEl = null;
@@ -813,6 +816,12 @@ function hideWordPop() {
   wordPopEl?.remove();
   wordPopEl = null;
 }
+
+// One persistent outside-tap listener; taps that OPEN a popup call
+// stopPropagation, so this never races with them
+document.addEventListener('click', (e) => {
+  if (wordPopEl && !wordPopEl.contains(e.target)) hideWordPop();
+});
 
 async function showWordPop(hit, x, y) {
   hideWordPop();
@@ -841,13 +850,27 @@ async function showWordPop(hit, x, y) {
   pop.style.top = (y + 24 + rect.height > window.innerHeight ? y - rect.height - 12 : y + 24) + 'px';
 
   let translation = '';
-  translateTexts([word], lang)
-    .then((tr) => {
-      translation = tr?.[0] && tr[0].toLowerCase() !== word.toLowerCase() ? tr[0] : '';
-      const el = pop.querySelector('.word-pop-tr');
-      if (el) el.textContent = translation || '—';
-    })
-    .catch(() => { const el = pop.querySelector('.word-pop-tr'); if (el) el.textContent = '—'; });
+  const requestTranslation = () => {
+    const el = pop.querySelector('.word-pop-tr');
+    if (el) el.textContent = '…';
+    translateTexts([word], lang)
+      .then((tr) => {
+        translation = tr?.[0] && tr[0].toLowerCase() !== word.toLowerCase() ? tr[0] : '';
+        const out = pop.querySelector('.word-pop-tr');
+        if (out) {
+          out.textContent = translation || '— tap to retry';
+          out.classList.toggle('tr-retry', !translation);
+        }
+      })
+      .catch(() => {
+        const out = pop.querySelector('.word-pop-tr');
+        if (out) { out.textContent = '— tap to retry'; out.classList.add('tr-retry'); }
+      });
+  };
+  requestTranslation();
+  pop.querySelector('.word-pop-tr').addEventListener('click', (ev) => {
+    if (ev.target.classList.contains('tr-retry')) { ev.stopPropagation(); requestTranslation(); }
+  });
 
   pop.addEventListener('click', (ev) => {
     ev.stopPropagation();
@@ -870,13 +893,6 @@ async function showWordPop(hit, x, y) {
       openSheet(sentence, word);
     }
   });
-
-  setTimeout(() => document.addEventListener('click', dismissPopOnce), 0);
-}
-
-function dismissPopOnce(e) {
-  if (wordPopEl && !wordPopEl.contains(e.target)) hideWordPop();
-  document.removeEventListener('click', dismissPopOnce);
 }
 
 function quickSaveFromBook(word, translation, sentence, lang, { silent = false } = {}) {

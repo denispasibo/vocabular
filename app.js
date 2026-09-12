@@ -277,8 +277,7 @@ async function fetchDatamuseSynonyms(word, lang = 'en') {
 
 // Batch-translate an array of strings to Russian in one request.
 // Strings are joined with newlines; the response preserves them.
-async function translateTexts(texts, from = 'en') {
-  const clean = texts.map((t) => (t || '').replace(/\s+/g, ' ').trim());
+async function translateGtx(clean, from) {
   const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + from + '&tl=ru&dt=t&q=' +
     encodeURIComponent(clean.join('\n'));
   const data = await fetchJson(url);
@@ -287,6 +286,50 @@ async function translateTexts(texts, from = 'en') {
   const full = segs.map((s) => s[0] || '').join('');
   const lines = full.split('\n').map((s) => s.trim());
   return lines.length === clean.length ? lines : null;
+}
+
+const trCache = new Map();
+
+async function translateTexts(texts, from = 'en') {
+  const clean = texts.map((t) => (t || '').replace(/\s+/g, ' ').trim());
+  const cacheKey = from + '|' + clean.join('\n');
+  if (trCache.has(cacheKey)) return trCache.get(cacheKey);
+  const done = (lines) => {
+    if (lines && trCache.size < 800) trCache.set(cacheKey, lines);
+    return lines;
+  };
+
+  let lines = await translateGtx(clean, from);
+  if (lines) return done(lines);
+
+  const single = clean.length === 1 ? clean[0] : null;
+
+  // Second Google endpoint (its own quota) — good for words and short texts
+  if (single && single.length <= 250) {
+    const alt = await fetchJson(
+      'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=' + from +
+      '&tl=ru&q=' + encodeURIComponent(single)
+    );
+    const t = Array.isArray(alt) ? (Array.isArray(alt[0]) ? alt[0][0] : alt[0]) : null;
+    if (typeof t === 'string' && t) return done([t.trim()]);
+  }
+
+  // Bursts get throttled — a short pause and one more try usually passes
+  await new Promise((r) => setTimeout(r, 700));
+  lines = await translateGtx(clean, from);
+  if (lines) return done(lines);
+
+  // Last resort for sentences only: MyMemory machine translation.
+  // (Never for single words — its memory returns confident nonsense there.)
+  if (single && /\s/.test(single) && single.length <= 450) {
+    const mm = await fetchJson(
+      'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(single) +
+      '&langpair=' + from + '|ru'
+    );
+    const t = mm?.responseData?.translatedText;
+    if (mm?.responseStatus === 200 && t) return done([t.trim()]);
+  }
+  return null;
 }
 
 // Attach Russian translations to the word and all its definitions.
