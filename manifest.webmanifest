@@ -4,8 +4,8 @@
   "description": "Learn English words with a checklist: meaning, pronunciation, examples, synonyms, etymology and Playphrase.",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#F2F2F7",
-  "theme_color": "#F2F2F7",
+  "background_color": "#0A0A0A",
+  "theme_color": "#F2F1EE",
   "lang": "en",
   "icons": [
     {
