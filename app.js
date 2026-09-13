@@ -66,6 +66,27 @@ function updateCounts() {
   const due = dueWords().length;
   reviewCount.hidden = due === 0;
   reviewCount.textContent = due;
+  renderStudyEmpty(words);
+}
+
+// Home idle screen: recent words for quick re-access; the onboarding
+// checklist retires once the habit is formed
+function renderStudyEmpty(words) {
+  const recentBlock = $('#recent-block');
+  const recentRow = $('#recent-words');
+  if (!recentBlock) return;
+  const recent = words.slice(0, 8);
+  recentBlock.hidden = recent.length === 0;
+  $('#onboarding-block').hidden = words.length >= 5;
+  recentRow.innerHTML = recent
+    .map((x) => `<button class="chip" type="button" data-recent="${esc(x.word)}">${esc(x.word)}</button>`)
+    .join('');
+  recentRow.querySelectorAll('[data-recent]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      searchInput.value = chip.dataset.recent;
+      lookupWord(chip.dataset.recent);
+    });
+  });
 }
 
 /* ---------- Helpers ---------- */
@@ -491,12 +512,16 @@ function initYouglish(word, lang = 'en') {
 
 /* ---------- Rendering the checklist ---------- */
 
-function stepHtml(num, title, bodyHtml, open = false) {
+// meta: short hint shown in the collapsed header (a count, IPA, or '—'
+// for steps with nothing inside, so users know before they tap)
+function stepHtml(num, title, bodyHtml, open = false, meta = '') {
+  const empty = meta === '—';
   return `
-    <div class="step${open ? ' open done' : ''}" data-step="${num}">
+    <div class="step${open ? ' open done' : ''}${empty ? ' step-lean' : ''}" data-step="${num}">
       <button class="step-header" type="button">
         <span class="step-num">${num}</span>
         <span>${title}</span>
+        ${meta ? `<span class="step-meta">${esc(meta)}</span>` : ''}
         <span class="step-chevron">›</span>
       </button>
       <div class="step-body">${bodyHtml}</div>
@@ -605,20 +630,32 @@ function renderStudy(entry, { saved = false } = {}) {
       (movie scenes — it can’t be embedded, opens in a new tab).` : ''}
     </p>`;
 
+  const synCount = sensesWithSyns.length
+    ? sensesWithSyns.reduce((n, m) => n + Math.min(m.synonyms.length, 10), 0)
+    : entry.synonyms.length;
+  const defCount = hasData ? entry.meanings[0].definitions.length : 0;
+  const otherCount = entry.meanings.length > 1
+    ? entry.meanings.slice(1).reduce((n, m) => n + Math.min(m.definitions.length, 2), 0)
+    : 0;
+
   studyArea.innerHTML = `
     <div class="word-head">
       <div>
         <div class="word-title">${esc(w)}</div>
         ${entry.phonetic ? `<div class="word-phonetic">${esc(entry.phonetic)}</div>` : ''}
       </div>
-      <button class="audio-btn" type="button" id="play-audio-head" aria-label="Pronunciation">🔊</button>
+      <div class="word-head-actions">
+        <button class="audio-btn" type="button" id="play-audio-head" aria-label="Pronunciation">🔊</button>
+        <button class="audio-btn save-head${saved ? ' saved' : ''}" type="button" id="save-head"
+                aria-label="${saved ? 'Saved' : 'Save to dictionary'}">${saved ? '✓' : '＋'}</button>
+      </div>
     </div>
     ${stepHtml(1, 'Meaning', step1, true)}
-    ${stepHtml(2, 'Pronunciation', step2)}
-    ${stepHtml(3, 'Explanation & example', step3)}
-    ${stepHtml(4, 'Similar words', step4)}
-    ${stepHtml(5, 'Other meanings', step5)}
-    ${stepHtml(6, 'History & origin', step6)}
+    ${stepHtml(2, 'Pronunciation', step2, false, entry.phonetic || '')}
+    ${stepHtml(3, 'Explanation & example', step3, false, defCount ? String(defCount) : '—')}
+    ${stepHtml(4, 'Similar words', step4, false, synCount ? String(synCount) : '—')}
+    ${stepHtml(5, 'Other meanings', step5, false, otherCount ? String(otherCount) : '—')}
+    ${stepHtml(6, 'History & origin', step6, false, entry.etymology ? '' : '—')}
     ${stepHtml(7, 'See it in action', step7)}
     <div class="step open" style="padding:14px 16px">
       <label style="font-weight:600;font-size:15px">📝 My note</label>
@@ -663,6 +700,9 @@ function bindStudyEvents(entry, saved) {
   $('#play-audio')?.addEventListener('click', playAudio);
   $('#play-audio-head')?.addEventListener('click', playAudio);
   $('#play-slow')?.addEventListener('click', () => speak(entry.word, 0.55, entry.lang));
+
+  // Quick save from the word header — same action as the bottom button
+  $('#save-head')?.addEventListener('click', () => $('#save-btn')?.click());
 
   // Tap a synonym to study it
   studyArea.querySelectorAll('[data-lookup]').forEach((chip) => {
@@ -759,14 +799,24 @@ function renderDict(filter = '') {
   );
 
   dictEmpty.hidden = words.length > 0 || filter !== '';
+
+  const all = loadWords().filter((x) => langOf(x) === currentLang);
+  const due = dueWords(loadWords()).length;
+  const summary = $('#dict-summary');
+  summary.hidden = all.length === 0;
+  summary.textContent = `${all.length} ${all.length === 1 ? 'word' : 'words'}` +
+    (due ? ` · ${due} due for review` : '');
+
+  const now = Date.now();
   dictList.innerHTML = words.map((x) => {
     const sub = x.note || x.meanings[0]?.definitions[0]?.definition || '';
+    const isDue = x.srs && x.srs.due <= now;
     const date = x.addedAt
       ? new Date(x.addedAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })
       : '';
     return `<li class="dict-item" data-id="${esc(x.id)}">
       <div class="dict-item-main">
-        <div class="dict-item-word">${esc(x.word)}</div>
+        <div class="dict-item-word">${esc(x.word)}${isDue ? ' <span class="due-dot" title="Due for review"></span>' : ''}</div>
         ${sub ? `<div class="dict-item-sub">${esc(sub)}</div>` : ''}
       </div>
       <span class="dict-item-date">${date}</span>
@@ -788,10 +838,20 @@ function renderDict(filter = '') {
 
 let reviewQueue = [];
 let reviewDone = 0;
+let practiceMode = false; // free practice never touches the SRS schedule
 
 function startReview() {
   reviewQueue = dueWords().sort(() => Math.random() - 0.5);
   reviewDone = 0;
+  practiceMode = false;
+  renderReviewCard();
+}
+
+function startPractice() {
+  const words = loadWords().filter((x) => langOf(x) === currentLang);
+  reviewQueue = words.sort(() => Math.random() - 0.5).slice(0, 10);
+  reviewDone = 0;
+  practiceMode = true;
   renderReviewCard();
 }
 
@@ -840,23 +900,26 @@ function pickCardType(entry) {
 
 function renderReviewCard() {
   if (!reviewQueue.length) {
-    const withSrs = loadWords().filter((x) => x.srs);
-    const next = withSrs.sort((a, b) => a.srs.due - b.srs.due)[0];
+    const langWords = loadWords().filter((x) => langOf(x) === currentLang && x.srs);
+    const next = langWords.sort((a, b) => a.srs.due - b.srs.due)[0];
     const nextStr = next
       ? `Next review: <strong>${esc(next.word)}</strong> on ${new Date(next.srs.due).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}.`
       : 'Save some words first — they’ll show up here for review.';
     reviewArea.innerHTML = `<div class="empty-state">
       <div class="empty-icon">${reviewDone ? '🎉' : '✅'}</div>
       <p>${reviewDone
-        ? `Done! You reviewed ${reviewDone} ${reviewDone === 1 ? 'word' : 'words'}.`
-        : 'Nothing to review right now.'}<br>${nextStr}</p>
+        ? `Done! You went through ${reviewDone} ${reviewDone === 1 ? 'word' : 'words'}.`
+        : 'Nothing scheduled right now.'}<br>${nextStr}</p>
+      ${langWords.length ? `<button class="btn btn-ghost" id="practice-btn" style="margin-top:18px">🎲 Practice ${Math.min(10, langWords.length)} random words</button>
+      <p class="muted" style="font-size:12.5px;margin-top:8px">Free practice — doesn’t change the review schedule.</p>` : ''}
     </div>`;
+    $('#practice-btn')?.addEventListener('click', startPractice);
     return;
   }
 
   const entry = reviewQueue[0];
   const type = pickCardType(entry);
-  const progress = `<p class="review-progress muted">${reviewDone + 1} / ${reviewDone + reviewQueue.length}</p>`;
+  const progress = `<p class="review-progress muted">${practiceMode ? '🎲 practice · ' : ''}${reviewDone + 1} / ${reviewDone + reviewQueue.length}</p>`;
   const playWord = () => {
     if (entry.audio) new Audio(entry.audio).play().catch(() => speak(entry.word, 0.92, langOf(entry)));
     else speak(entry.word, 0.92, langOf(entry));
@@ -970,8 +1033,14 @@ function renderReviewCard() {
 }
 
 function answerReview(entry, knew) {
+  if (practiceMode) {
+    reviewQueue.shift();
+    reviewDone++;
+    renderReviewCard();
+    return;
+  }
   const words = loadWords();
-  const stored = words.find((x) => x.id === entry.id);
+  const stored = words.find((x) => x.id === entry.id && langOf(x) === langOf(entry));
   if (stored) {
     const stage = knew ? Math.min((stored.srs?.stage ?? 0) + 1, SRS_INTERVALS.length - 1) : 0;
     stored.srs = { stage, due: Date.now() + SRS_INTERVALS[stage] * DAY };

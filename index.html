@@ -31,25 +31,31 @@
     <!-- Screen: new word -->
     <section id="screen-study" class="screen">
       <form id="search-form" class="search-form" autocomplete="off">
-        <input id="search-input" type="text" inputmode="latin"
+        <input id="search-input" type="search" inputmode="latin"
                placeholder="Type a word or phrase…" aria-label="Word or phrase" required>
         <button type="submit" class="btn btn-primary" id="search-btn">Study</button>
       </form>
 
       <div id="study-area" class="study-area" hidden></div>
 
-      <div id="study-empty" class="empty-state">
-        <div class="empty-icon">📖</div>
-        <p>Came across a new word?<br>Type it in and walk through the checklist:</p>
-        <ol class="mini-checklist">
-          <li>Meaning</li>
-          <li>Pronunciation</li>
-          <li>Explanation &amp; example</li>
-          <li>Similar words</li>
-          <li>Other meanings</li>
-          <li>History &amp; origin</li>
-          <li>See it in action — Playphrase</li>
-        </ol>
+      <div id="study-empty">
+        <div id="recent-block" hidden>
+          <p class="section-label">Recent</p>
+          <div id="recent-words" class="chip-row"></div>
+        </div>
+        <div class="empty-state" id="onboarding-block">
+          <div class="empty-icon">📖</div>
+          <p>Came across a new word?<br>Type it in and walk through the checklist:</p>
+          <ol class="mini-checklist">
+            <li>Meaning</li>
+            <li>Pronunciation</li>
+            <li>Explanation &amp; example</li>
+            <li>Similar words</li>
+            <li>Other meanings</li>
+            <li>History &amp; origin</li>
+            <li>See it in action — Playphrase</li>
+          </ol>
+        </div>
       </div>
     </section>
 
@@ -73,6 +79,7 @@
           <input type="file" id="import-file" accept="application/json" hidden>
         </div>
       </div>
+      <p id="dict-summary" class="dict-summary muted" hidden></p>
       <ul id="dict-list" class="dict-list"></ul>
       <div id="dict-empty" class="empty-state" hidden>
         <div class="empty-icon">🗂</div>

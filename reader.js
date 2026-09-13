@@ -398,11 +398,15 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
         <button class="btn btn-primary btn-block" id="ocr-btn">🔍 Recognize text (OCR)</button>` : ''}
     </div>` : ''}
     <div class="lib-toolbar">
-      <button class="btn btn-primary" id="add-book-btn">📂 Add book</button>
-      <button class="btn btn-ghost" id="add-song-btn">🎵 Add song</button>
-      <button class="btn btn-ghost" id="paste-text-btn">📋 Paste text</button>
-      <button class="btn btn-ghost" id="ai-settings-btn" title="AI settings">${hasKey ? '🤖 AI ✓' : '🤖 AI'}</button>
+      <button class="btn btn-primary" id="add-menu-btn">＋ Add</button>
+      <div style="flex:1"></div>
+      <button class="btn btn-ghost btn-small" id="ai-settings-btn" title="AI settings">${hasKey ? '🤖 AI ✓' : '🤖 AI'}</button>
       <input type="file" id="book-file" accept=".epub,.pdf,.txt" hidden>
+    </div>
+    <div id="add-menu" class="ai-settings add-menu" hidden>
+      <button class="add-option" id="add-book-btn">📂 <span>Book file<small>EPUB, PDF or TXT — scans get OCR</small></span></button>
+      <button class="add-option" id="add-song-btn">🎵 <span>Song<small>Find lyrics by artist and title</small></span></button>
+      <button class="add-option" id="paste-text-btn">📋 <span>Paste text<small>Any article or fragment</small></span></button>
     </div>
     <div id="song-form" class="ai-settings" hidden>
       <form id="song-search-form" class="typing-row" style="margin-top:0">
@@ -445,7 +449,17 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
   `;
 
   const fileInput = document.getElementById('book-file');
-  document.getElementById('add-book-btn').addEventListener('click', () => fileInput.click());
+  const addMenu = document.getElementById('add-menu');
+  document.getElementById('add-menu-btn').addEventListener('click', () => {
+    addMenu.hidden = !addMenu.hidden;
+    document.getElementById('ai-settings').hidden = true;
+    document.getElementById('paste-form').hidden = true;
+    document.getElementById('song-form').hidden = true;
+  });
+  document.getElementById('add-book-btn').addEventListener('click', () => {
+    addMenu.hidden = true;
+    fileInput.click();
+  });
   fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -493,19 +507,19 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
   });
 
   document.getElementById('paste-text-btn').addEventListener('click', () => {
-    const f = document.getElementById('paste-form');
-    f.hidden = !f.hidden;
+    addMenu.hidden = true;
+    document.getElementById('paste-form').hidden = false;
     document.getElementById('ai-settings').hidden = true;
     document.getElementById('song-form').hidden = true;
   });
 
   // Songs
   document.getElementById('add-song-btn').addEventListener('click', () => {
-    const f = document.getElementById('song-form');
-    f.hidden = !f.hidden;
+    addMenu.hidden = true;
+    document.getElementById('song-form').hidden = false;
     document.getElementById('ai-settings').hidden = true;
     document.getElementById('paste-form').hidden = true;
-    if (!f.hidden) document.getElementById('song-query').focus();
+    document.getElementById('song-query').focus();
   });
   document.getElementById('song-search-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -556,6 +570,8 @@ async function renderRead(errorMsg = '', { offerOcr = false } = {}) {
     const f = document.getElementById('ai-settings');
     f.hidden = !f.hidden;
     document.getElementById('paste-form').hidden = true;
+    document.getElementById('song-form').hidden = true;
+    addMenu.hidden = true;
   });
   document.getElementById('api-key-save').addEventListener('click', () => {
     const v = document.getElementById('api-key-input').value.trim();
